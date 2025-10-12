@@ -3,6 +3,7 @@ import { spawn } from 'child_process';
 import WebSocket from 'ws';
 import net from 'net';
 import path from 'path';
+import crypto from 'crypto';
 
 const PORT = 9876;
 const TOKEN = 'testtoken';
@@ -38,10 +39,12 @@ describe('MCP server integration', () => {
     if (child && !child.killed) child.kill();
   });
 
-  it('register/upsert/search/get', async () => {
+  it('handles task lifecycle, metadata, archiving, and blob validation', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}`);
-    let sessionId = null;
-    const call = (id: number, method: string, params: any) => {
+    let sessionId: string | null = null;
+    const primaryId = `IT-${Date.now()}`;
+    const metaId = `${primaryId}-meta`;
+    const call = (id: number, method: string, params: any = {}) => {
       if (sessionId && method !== 'register') {
         params.session = sessionId;
       }
@@ -50,26 +53,60 @@ describe('MCP server integration', () => {
 
     const recv = (): Promise<any> => new Promise((res) => ws.once('message', (d) => res(JSON.parse(d.toString()))));
 
-    await new Promise<void>(r => ws.on('open', () => r()));
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
 
     call(1, 'register', { worker_id:'it', authToken: TOKEN });
     let r = await recv();
     expect(r.result?.ok).toBe(true);
     sessionId = r.result?.session;
 
-    call(2, 'upsert_task', { id:'IT-1', title:'it test', text:'alpha beta gamma' });
+    call(2, 'upsert_task', { id:primaryId, title:'it test', text:'alpha beta gamma' });
     r = await recv();
-    console.log('upsert_task response:', JSON.stringify(r, null, 2));
     expect(r.result?.vclock).toBeGreaterThan(0);
 
     call(3, 'search', { q:'beta', highlight:true });
     r = await recv();
-    expect(r.result?.hits?.length).toBeGreaterThan(0);
+    expect(r.result?.hits?.some((hit: any) => hit.id === primaryId)).toBe(true);
 
-    call(4, 'get_task', { id:'IT-1' });
+    call(4, 'get_task', { id:primaryId });
     r = await recv();
-    expect(r.result?.task?.id).toBe('IT-1');
+    expect(r.result?.task?.id).toBe(primaryId);
+
+    call(5, 'upsert_task', { id:metaId, title:'meta task', text:'payload', meta:{ tag:'keep' } });
+    r = await recv();
+    expect(r.result?.vclock).toBeGreaterThan(0);
+
+    call(6, 'get_task', { id:metaId });
+    r = await recv();
+    expect(r.result?.task?.meta).toBe(JSON.stringify({ tag:'keep' }));
+
+    call(7, 'upsert_task', { id:metaId, title:'meta task updated', text:'payload updated' });
+    r = await recv();
+    expect(r.result?.vclock).toBeGreaterThan(1);
+
+    call(8, 'get_task', { id:metaId });
+    r = await recv();
+    expect(r.result?.task?.meta).toBe(JSON.stringify({ tag:'keep' }));
+
+    call(9, 'archive_task', { id:primaryId, reason:'done' });
+    r = await recv();
+    expect(r.result?.ok).toBe(true);
+
+    call(10, 'search', { q:'beta', highlight:false });
+    r = await recv();
+    expect(r.result?.hits?.some((hit: any) => hit.id === primaryId)).toBe(false);
+
+    call(11, 'list_recent', {});
+    r = await recv();
+    expect(r.result?.items?.some((hit: any) => hit.id === primaryId)).toBe(false);
+
+    const bytes = Buffer.from('blob-payload');
+    const wrongSha = crypto.createHash('sha256').update('different').digest('hex');
+    call(12, 'attach_blob', { id:metaId, bytes_base64: bytes.toString('base64'), sha256: wrongSha });
+    r = await recv();
+    expect(r.error?.code).toBe(400);
 
     ws.close();
-  }, 15000);
+  }, 20000);
 });
+

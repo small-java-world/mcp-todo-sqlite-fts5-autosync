@@ -97,3 +97,147 @@ data/
 ### 手動同期（RPC）
 - `server_sync_export` … サーバ側で上記と同じ処理を即時実行。
 
+
+## 10) MCP設定（Cursor / Claude Desktop / Codex CLI）
+
+### 10.1 Cursor設定
+
+#### ローカル接続
+```json
+{
+  "mcpServers": {
+    "mcp-todo-server": {
+      "command": "node",
+      "args": ["dist/server.js"],
+      "cwd": "D:\\mcp-todo-sqlite-fts5-autosync",
+      "env": {
+        "MCP_TOKEN": "devtoken"
+      }
+    }
+  }
+}
+```
+
+#### リモート接続（IPアドレス指定）
+```json
+{
+  "mcpServers": {
+    "mcp-todo-server": {
+      "command": "node",
+      "args": ["remote_client.js"],
+      "cwd": "D:\\mcp-todo-sqlite-fts5-autosync",
+      "env": {
+        "MCP_SERVER_IP": "192.168.1.9",
+        "MCP_TOKEN": "devtoken"
+      }
+    }
+  }
+}
+```
+
+**設定ファイルの場所:**
+- Windows: `%APPDATA%\Cursor\User\settings.json`
+- macOS: `~/Library/Application Support/Cursor/User/settings.json`
+- Linux: `~/.config/Cursor/User/settings.json`
+
+### 10.2 Claude Desktop設定
+
+#### ローカル接続
+```json
+{
+  "mcpServers": {
+    "mcp-todo-server": {
+      "command": "node",
+      "args": ["dist/server.js"],
+      "cwd": "D:\\mcp-todo-sqlite-fts5-autosync",
+      "env": {
+        "MCP_TOKEN": "devtoken"
+      }
+    }
+  }
+}
+```
+
+#### リモート接続（IPアドレス指定）
+```json
+{
+  "mcpServers": {
+    "mcp-todo-server": {
+      "command": "node",
+      "args": ["remote_client.js"],
+      "cwd": "D:\\mcp-todo-sqlite-fts5-autosync",
+      "env": {
+        "MCP_SERVER_IP": "192.168.1.9",
+        "MCP_TOKEN": "devtoken"
+      }
+    }
+  }
+}
+```
+
+**設定ファイルの場所:**
+- Windows: `%APPDATA%\Claude\claude_desktop_config\mcp_servers\mcp-todo-server.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
+- Linux: `~/.config/claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
+
+### 10.3 Codex CLI設定
+
+#### ローカル接続
+```bash
+# 環境変数設定
+export MCP_SERVER_URL="ws://127.0.0.1:8765"
+export MCP_TOKEN="devtoken"
+
+# Codex CLI実行
+codex --mcp-server-url $MCP_SERVER_URL --mcp-token $MCP_TOKEN
+```
+
+#### リモート接続（IPアドレス指定）
+```bash
+# 環境変数設定
+export MCP_SERVER_URL="ws://192.168.1.9:8765"
+export MCP_TOKEN="devtoken"
+
+# Codex CLI実行
+codex --mcp-server-url $MCP_SERVER_URL --mcp-token $MCP_TOKEN
+```
+
+### 10.4 リモート接続のための設定
+
+#### サーバー側（MCP TODO Server）
+```bash
+# サーバー起動
+$env:MCP_TOKEN="devtoken"; npm start
+
+# ファイアウォール設定（Windows管理者権限で実行）
+netsh advfirewall firewall add rule name="MCP TODO Server" dir=in action=allow protocol=TCP localport=8765
+```
+
+#### クライアント側（リモート接続用）
+```bash
+# リモートクライアント実行
+$env:MCP_SERVER_IP="192.168.1.9"; node remote_client.js
+```
+
+#### ネットワーク設定
+1. **ファイアウォール設定**: ポート8765を開放
+2. **IPアドレス確認**: `ipconfig` (Windows) / `ifconfig` (macOS/Linux)
+3. **ネットワーク確認**: 同一ネットワーク内であることを確認
+
+### 10.5 トラブルシューティング
+
+#### 接続エラーの場合
+1. **ファイアウォール確認**: ポート8765が開放されているか
+2. **IPアドレス確認**: 正しいサーバーIPアドレスを指定しているか
+3. **ネットワーク確認**: 両方のマシンが同一ネットワークにいるか
+4. **認証確認**: 同じ`MCP_TOKEN`を使用しているか
+
+#### ログ確認
+```bash
+# サーバーログ確認
+$env:MCP_TOKEN="devtoken"; npm start
+
+# クライアントログ確認
+$env:MCP_SERVER_IP="192.168.1.9"; node remote_client.js
+```
+

@@ -85,10 +85,11 @@ wss.on('connection', (ws, req) => {
         }
         case 'upsert_task': {
           requireAuth(params);
-          const { id: tid, title, text, meta, if_vclock } = params || {};
+          const { id: tid, title, text, if_vclock } = params || {};
+          const metaArg = params && Object.prototype.hasOwnProperty.call(params, 'meta') ? params.meta : undefined;
           if (!tid || !title || !text) { send(err(400,'missing_fields', id)); break; }
           try {
-            const vclock = db.upsertTask(String(tid), String(title), String(text), meta ?? null, typeof if_vclock==='number'?if_vclock:undefined);
+            const vclock = db.upsertTask(String(tid), String(title), String(text), metaArg, typeof if_vclock==='number' ? if_vclock : undefined);
             send(ok({ vclock }, id));
           } catch (e: any) {
             if (e.code === 409) send(err(409, 'vclock_conflict', id));
@@ -138,10 +139,12 @@ wss.on('connection', (ws, req) => {
           if (!tid) { send(err(400,'missing_task_id', id)); break; }
           if (!sha256 && !bytes_base64) { send(err(400,'missing_blob', id)); break; }
           const buf = bytes_base64 ? Buffer.from(String(bytes_base64), 'base64') : null;
-          const digest = sha256 || (buf ? crypto.createHash('sha256').update(buf).digest('hex') : null);
+          const provided = typeof sha256 === 'string' ? sha256.toLowerCase() : null;
+          const computed = buf ? crypto.createHash('sha256').update(buf).digest('hex') : null;
+          if (buf && provided && provided !== computed) { send(err(400,'bad_blob_digest', id)); break; }
+          const digest = provided ?? computed;
           if (!digest) { send(err(400,'bad_blob', id)); break; }
           if (buf) db.putBlob(digest, buf, buf.length);
-          // link
           db.db.prepare(`INSERT OR IGNORE INTO task_blobs(task_id, sha256) VALUES (?,?)`).run(String(tid), digest);
           send(ok({ sha256: digest, ok: true }, id));
           break;
