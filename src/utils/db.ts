@@ -74,10 +74,10 @@ export class DB {
     this.db.exec(sql);
 
     // Backfill columns for pre-existing databases
-    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`); } catch (e) { /* ignore if exists */ }
+try { this.db.exec(`ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE archived_tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
-    this.db.exec(`
+this.db.exec(`
   CREATE TABLE IF NOT EXISTS archived_tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -130,6 +130,59 @@ export class DB {
     body TEXT NOT NULL,
     is_internal BOOLEAN DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS review_issues (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    review_id INTEGER,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    priority TEXT DEFAULT 'medium',
+    category TEXT,
+    severity TEXT DEFAULT 'medium',
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    resolved_at INTEGER,
+    resolved_by TEXT,
+    closed_at INTEGER,
+    closed_by TEXT,
+    due_date INTEGER,
+    tags TEXT,
+    FOREIGN KEY (task_id) REFERENCES tasks(id),
+    FOREIGN KEY (review_id) REFERENCES reviews(id)
+  );
+  CREATE TABLE IF NOT EXISTS issue_responses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id INTEGER NOT NULL,
+    response_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    is_internal BOOLEAN DEFAULT 0,
+    attachment_sha256 TEXT,
+    FOREIGN KEY (issue_id) REFERENCES review_issues(id)
+  );
+  CREATE TABLE IF NOT EXISTS issue_relations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_issue_id INTEGER NOT NULL,
+    target_issue_id INTEGER NOT NULL,
+    relation_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT NOT NULL,
+    FOREIGN KEY (source_issue_id) REFERENCES review_issues(id),
+    FOREIGN KEY (target_issue_id) REFERENCES review_issues(id),
+    UNIQUE(source_issue_id, target_issue_id, relation_type)
+  );
+  CREATE INDEX IF NOT EXISTS idx_review_issues_task_id ON review_issues(task_id);
+  CREATE INDEX IF NOT EXISTS idx_review_issues_status ON review_issues(status);
+  CREATE INDEX IF NOT EXISTS idx_review_issues_priority ON review_issues(priority);
+  CREATE INDEX IF NOT EXISTS idx_review_issues_category ON review_issues(category);
+  CREATE INDEX IF NOT EXISTS idx_review_issues_created_by ON review_issues(created_by);
+  CREATE INDEX IF NOT EXISTS idx_review_issues_created_at ON review_issues(created_at);
+  CREATE INDEX IF NOT EXISTS idx_issue_responses_issue_id ON issue_responses(issue_id);
+  CREATE INDEX IF NOT EXISTS idx_issue_responses_created_at ON issue_responses(created_at);
+  CREATE INDEX IF NOT EXISTS idx_issue_relations_source ON issue_relations(source_issue_id);
+  CREATE INDEX IF NOT EXISTS idx_issue_relations_target ON issue_relations(target_issue_id);
 `);
     // Triggers to sync FTS with base table
     this.db.exec(`
@@ -166,7 +219,7 @@ export class DB {
         err.code = 409;
         throw err;
       }
-      if (if_vclock != null && if_vclock !== row.vclock) {
+    if (if_vclock != null && if_vclock !== row.vclock) {
         const err: any = new Error('vclock_conflict');
         err.code = 409;
         err.current = row.vclock;
@@ -256,19 +309,19 @@ export class DB {
 
   putBlob(sha256: string, bytes: Buffer, size: number) {
     const p = this.getBlobPath(sha256);
-    if (!fs.existsSync(p)) {
-      fs.writeFileSync(p, bytes);
-    }
-    const now = Date.now();
-    this.db.prepare(`INSERT OR IGNORE INTO blobs(sha256,size,created_at) VALUES (?,?,?)`).run(sha256, size, now);
-    return p;
+if (!fs.existsSync(p)) {
+  fs.writeFileSync(p, bytes);
+}
+const now = Date.now();
+this.db.prepare(`INSERT OR IGNORE INTO blobs(sha256,size,created_at) VALUES (?,?,?)`).run(sha256, size, now);
+return p;
   }
 
   getBlobPath(sha256: string) {
     return path.join(this.casRoot, sha256);
   }
 
-  archiveTask(id: string, reason?: string) {
+archiveTask(id: string, reason?: string) {
   const row = this.getTask(id);
   if (!row) { const e: any = new Error('not_found'); e.code = 404; throw e; }
   if (row.archived) return { ok: true, archived_at: Date.now() };
@@ -286,9 +339,9 @@ export class DB {
   });
   tx();
   return { ok: true, archived_at: now };
-  }
+}
 
-  restoreTask(id: string) {
+restoreTask(id: string) {
   const snap = this.db.prepare(`SELECT * FROM archived_tasks WHERE id=?`).get(id) as any;
   if (!snap) { const e: any = new Error('not_found'); e.code = 404; throw e; }
   const now = Date.now();
@@ -304,19 +357,19 @@ export class DB {
   });
   tx();
   return { ok: true };
-  }
+}
 
-  listArchived(limit=20, offset=0) {
+listArchived(limit=20, offset=0) {
   return this.db.prepare(`SELECT id,title,archived_at,reason FROM archived_tasks ORDER BY archived_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
-  }
+}
 
   setState(id: string, to_state: string, by?: string | null, note?: string | null, at?: number) {
-    const row = this.getTask(id);
+  const row = this.getTask(id);
     if (!row) { const e: any = new Error('not_found'); e.code = 404; throw e; }
     if (row.archived) { const e: any = new Error('archived'); e.code = 409; throw e; }
-    if (row.state === to_state) return { vclock: row.vclock };
+  if (row.state === to_state) return { vclock: row.vclock };
     const ts = at ?? Date.now();
-    const vclock = row.vclock + 1;
+  const vclock = row.vclock + 1;
     
     // Check for duplicate state change (same timestamp and same state change)
     const existing = this.db.prepare(`
@@ -324,42 +377,42 @@ export class DB {
       WHERE task_id = ? AND from_state = ? AND to_state = ? AND at = ? AND by = ?
     `).get(id, row.state, to_state, ts, by ?? null);
     
-    if (existing.count === 0) {
-      this.db.prepare(`UPDATE tasks SET state=?, done=?, vclock=?, updated_at=? WHERE id=?`)
+    if ((existing as any).count === 0) {
+  this.db.prepare(`UPDATE tasks SET state=?, done=?, vclock=?, updated_at=? WHERE id=?`)
         .run(to_state, to_state === 'DONE' ? 1 : 0, vclock, ts, id);
-      this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at, by, note) VALUES (?,?,?,?,?,?)`)
+  this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at, by, note) VALUES (?,?,?,?,?,?)`)
         .run(id, row.state, to_state, ts, by ?? null, note ?? null);
     } else {
       // Duplicate found, just update vclock without inserting history
       this.db.prepare(`UPDATE tasks SET vclock=? WHERE id=?`)
         .run(vclock, id);
     }
-    return { vclock };
-  }
+  return { vclock };
+}
 
   addReview(task_id: string, decision: string, by: string, note?: string | null, at?: number | null) {
-    const row = this.getTask(task_id);
+  const row = this.getTask(task_id);
     if (!row) { const e: any = new Error('not_found'); e.code = 404; throw e; }
     const ts = at ?? Date.now();
-    this.db.prepare(`INSERT INTO reviews(task_id, at, by, decision, note) VALUES (?,?,?,?,?)`)
+  this.db.prepare(`INSERT INTO reviews(task_id, at, by, decision, note) VALUES (?,?,?,?,?)`)
       .run(task_id, ts, by, decision, note ?? null);
-    if (decision === 'REQUEST_CHANGES') {
+  if (decision === 'REQUEST_CHANGES') {
       return this.setState(task_id, 'CHANGES_REQUESTED', by, note ?? undefined, ts);
-    } else if (decision === 'APPROVED') {
+  } else if (decision === 'APPROVED') {
       return this.setState(task_id, 'APPROVED', by, note ?? undefined, ts);
-    }
-    return { ok: true };
   }
+  return { ok: true };
+}
 
   addComment(task_id: string, by: string, text: string, at?: number | null) {
     const ts = at ?? Date.now();
-    this.db.prepare(`INSERT INTO review_comments(task_id, at, by, text) VALUES (?,?,?,?)`)
+  this.db.prepare(`INSERT INTO review_comments(task_id, at, by, text) VALUES (?,?,?,?)`)
       .run(task_id, ts, by, text);
-    return { ok: true };
-  }
+  return { ok: true };
+}
 
-  // --- TODO.md import/export (minimal) ---
-  importTodoMd(md: string) {
+// --- TODO.md import/export (minimal) ---
+importTodoMd(md: string) {
   const lines = md.split(/\r?\n/);
   let currentSection: string|null = null;
   const sectionStack: string[] = [];
@@ -387,8 +440,14 @@ export class DB {
   const reRelatedWithContent = /^Related:\s+.+$/i;
   const reNotes = /^Notes:\s*$/i;
   const reReviewHdr = /^####\s+Reviews\s*$/i;
+  const reIssues = /^Issues:\s*$/i;
   const reReview = /^-\s+review@([^\s]+)\s+by\s+(\S+)\s*=>\s*(\S+)(?:\s+(.+))?$/i;
   const reComment = /^-\s+comment@([^\s]+)\s+by\s+(\S+):\s*"(.+)"\s*$/i;
+
+  // Issues parsing
+  const reIssueHeader = /^-\s+\*\*([^*]+)\*\*:\s*(.+)$/;
+  const reIssueField = /^  - ([^:]+):\s*(.+)$/;
+  const reIssueResponse = /^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+(\S+)\s+\((\w+)\):\s*"([^"]+)"(\s*\(internal\))?$/;
 
   // Timeline parsing
   const reTimelineEvent = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/;
@@ -406,12 +465,13 @@ export class DB {
   const reNoteItem = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/;
   const reNoteInternal = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/;
 
-  let inMeta = false;
+  let inMeta = false, inIssues = false;
   let inTimeline = false;
   let inRelated = false;
   let inNotes = false;
   let metaAccum: any = {};
   let inReviews = false;
+  let currentIssue: any = null;
   let metaJson = '';
   let inMetaJson = false;
 
@@ -420,7 +480,7 @@ export class DB {
 
     if (line.startsWith('# ') && !line.startsWith('##')) {
       currentSection = line.replace(/^#\s+/, '').trim();
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
       continue;
     }
     const m2 = line.match(reL2);
@@ -432,7 +492,7 @@ export class DB {
       const due = attrs.due ? isoToEpoch(attrs.due) : null;
       this.upsertTask(id, title, '', null, undefined, { parent_id: null, level: 2, state, assignee, due_at: due });
       lastTaskId = id;
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; metaAccum = {};
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false; metaAccum = {};
       continue;
     }
     const m3 = line.match(reL3);
@@ -445,19 +505,19 @@ export class DB {
       // parent is last L2
       const parent = lastTaskId;
       this.upsertTask(id, title, '', null, undefined, { parent_id: parent ?? null, level: 3, state, assignee, due_at: due });
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
       continue;
     }
     if (reMeta.test(line)) {
-      inMeta = true; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
+      inMeta = true; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
       continue;
     }
     if (reTimeline.test(line)) {
-      inTimeline = true; inMeta = false; inRelated = false; inNotes = false; inReviews=false;
+      inTimeline = true; inMeta = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
       continue;
     }
     if (reRelated.test(line)) {
-      inRelated = true; inMeta = false; inTimeline = false; inNotes = false; inReviews=false;
+      inRelated = true; inMeta = false; inTimeline = false; inNotes = false; inReviews=false; inIssues = false;
       continue;
     }
     if (reRelatedWithContent.test(line)) {
@@ -481,11 +541,15 @@ export class DB {
       continue;
     }
     if (reNotes.test(line)) {
-      inNotes = true; inMeta = false; inTimeline = false; inRelated = false; inReviews=false;
+      inNotes = true; inMeta = false; inTimeline = false; inRelated = false; inReviews=false; inIssues = false;
+      continue;
+    }
+    if (reIssues.test(line)) {
+      inIssues = true; inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews = false;
       continue;
     }
     if (reReviewHdr.test(line)) {
-      inReviews = true; inMeta=false;
+      inReviews = true; inMeta=false; inIssues = false;
       continue;
     }
     if (inMeta && line.trim()) {
@@ -648,6 +712,112 @@ export class DB {
       }
     }
 
+    if (inIssues && line.trim()) {
+      // Issues parsing
+      const issueHeaderMatch = reIssueHeader.exec(line);
+      if (issueHeaderMatch) {
+        // Save previous issue if exists
+        if (currentIssue && lastTaskId) {
+          this.saveIssue(currentIssue, lastTaskId);
+        }
+        
+        // Start new issue
+        const [, priority, title] = issueHeaderMatch;
+        currentIssue = {
+          title: title.trim(),
+          priority: priority.toLowerCase(),
+          status: 'open',
+          created_at: Date.now(),
+          created_by: 'system',
+          responses: []
+        };
+        continue;
+      }
+      
+      if (currentIssue) {
+        const fieldMatch = reIssueField.exec(line);
+        if (fieldMatch) {
+          const [, field, value] = fieldMatch;
+          const fieldName = field.toLowerCase().replace(/\s+/g, '_');
+          
+          switch (fieldName) {
+            case 'status':
+              currentIssue.status = value.toLowerCase();
+              break;
+            case 'priority':
+              currentIssue.priority = value.toLowerCase();
+              break;
+            case 'category':
+              currentIssue.category = value.toLowerCase();
+              break;
+            case 'severity':
+              currentIssue.severity = value.toLowerCase();
+              break;
+            case 'created':
+              // Handle "2025-01-16T09:00:00Z by reviewer1" format
+              const createdMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
+              if (createdMatch) {
+                currentIssue.created_at = new Date(createdMatch[1]).getTime();
+                currentIssue.created_by = createdMatch[2];
+              } else {
+                currentIssue.created_at = new Date(value).getTime();
+              }
+              break;
+            case 'created_by':
+              currentIssue.created_by = value;
+              break;
+            case 'resolved':
+              // Handle "2025-01-16T16:00:00Z by developer1" format
+              const resolvedMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
+              if (resolvedMatch) {
+                currentIssue.resolved_at = new Date(resolvedMatch[1]).getTime();
+                currentIssue.resolved_by = resolvedMatch[2];
+              } else {
+                currentIssue.resolved_at = new Date(value).getTime();
+              }
+              break;
+            case 'resolved_by':
+              currentIssue.resolved_by = value;
+              break;
+            case 'closed':
+              // Handle "2025-01-16T17:05:00Z by reviewer1" format
+              const closedMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
+              if (closedMatch) {
+                currentIssue.closed_at = new Date(closedMatch[1]).getTime();
+                currentIssue.closed_by = closedMatch[2];
+              } else {
+                currentIssue.closed_at = new Date(value).getTime();
+              }
+              break;
+            case 'closed_by':
+              currentIssue.closed_by = value;
+              break;
+            case 'due':
+              currentIssue.due_date = new Date(value).getTime();
+              break;
+            case 'tags':
+              currentIssue.tags = value.match(/\[([^\]]+)\]/g)?.map(tag => tag.slice(1, -1)) || [];
+              break;
+          }
+          continue;
+        }
+        
+        const responseMatch = reIssueResponse.exec(line);
+        if (responseMatch) {
+          const [, timestamp, author, responseType, content, isInternal] = responseMatch;
+          currentIssue.responses.push({
+            created_at: new Date(timestamp).getTime(),
+            created_by: author,
+            response_type: responseType,
+            content,
+            is_internal: !!isInternal
+          });
+          continue;
+        }
+        
+      }
+    }
+
     if (inReviews) {
       const mr = line.match(reReview);
       if (mr && lastTaskId) {
@@ -665,10 +835,66 @@ export class DB {
       }
     }
   }
-  return { ok: true };
+  
+  // Save the last issue if exists
+  if (currentIssue && lastTaskId) {
+    this.saveIssue(currentIssue, lastTaskId);
   }
+  
+  return { ok: true };
+}
 
-  exportTodoMd(): string {
+  saveIssue(issue: any, taskId: string) {
+    const stmt = this.db.prepare(`
+      INSERT INTO review_issues (
+        task_id, title, description, status, priority, category, severity,
+        created_at, created_by, resolved_at, resolved_by, closed_at, closed_by,
+        due_date, tags
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    const result = stmt.run(
+      taskId,
+      issue.title,
+      issue.description || null,
+      issue.status || 'open',
+      issue.priority || 'medium',
+      issue.category || null,
+      issue.severity || 'medium',
+      issue.created_at || Date.now(),
+      issue.created_by || 'system',
+      issue.resolved_at || null,
+      issue.resolved_by || null,
+      issue.closed_at || null,
+      issue.closed_by || null,
+      issue.due_date || null,
+      issue.tags ? JSON.stringify(issue.tags) : null
+    );
+    
+    const issueId = result.lastInsertRowid as number;
+    
+    // Save responses
+    if (issue.responses && issue.responses.length > 0) {
+      const responseStmt = this.db.prepare(`
+        INSERT INTO issue_responses (
+          issue_id, response_type, content, created_at, created_by, is_internal
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      
+      for (const response of issue.responses) {
+        responseStmt.run(
+          issueId,
+          response.response_type,
+          response.content,
+          response.created_at,
+          response.created_by,
+          response.is_internal ? 1 : 0
+        );
+      }
+    }
+}
+
+exportTodoMd(): string {
   // naive export: list L2 (parent null) and their L3
   const rows2 = this.db.prepare(`SELECT * FROM tasks WHERE level=2 AND archived=0 ORDER BY updated_at DESC`).all() as any[];
   const childStmt = this.db.prepare(`SELECT * FROM tasks WHERE parent_id=? AND archived=0 ORDER BY updated_at ASC`);
@@ -744,6 +970,53 @@ export class DB {
       }
     }
     
+    // Issues block
+    const issues = this.db.prepare(`SELECT * FROM review_issues WHERE task_id=? ORDER BY created_at ASC`).all(r.id) as any[];
+    if (issues.length > 0) {
+      out += `\nIssues:\n`;
+      for (const issue of issues) {
+        const priority = issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1);
+        out += `- **${priority}**: ${issue.title}\n`;
+        
+        if (issue.description) {
+          out += `  - Description: ${issue.description}\n`;
+        }
+        out += `  - Status: ${issue.status.charAt(0).toUpperCase() + issue.status.slice(1)}\n`;
+        out += `  - Priority: ${issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1)}\n`;
+        if (issue.category) {
+          out += `  - Category: ${issue.category.charAt(0).toUpperCase() + issue.category.slice(1)}\n`;
+        }
+        out += `  - Severity: ${issue.severity.charAt(0).toUpperCase() + issue.severity.slice(1)}\n`;
+        out += `  - Created: ${new Date(issue.created_at).toISOString()} by ${issue.created_by}\n`;
+        
+        if (issue.resolved_at) {
+          out += `  - Resolved: ${new Date(issue.resolved_at).toISOString()} by ${issue.resolved_by}\n`;
+        }
+        if (issue.closed_at) {
+          out += `  - Closed: ${new Date(issue.closed_at).toISOString()} by ${issue.closed_by}\n`;
+        }
+        if (issue.due_date) {
+          out += `  - Due: ${new Date(issue.due_date).toISOString()}\n`;
+        }
+        if (issue.tags) {
+          const tags = JSON.parse(issue.tags);
+          out += `  - Tags: [${tags.join(', ')}]\n`;
+        }
+        
+        // Responses
+        const responses = this.db.prepare(`SELECT * FROM issue_responses WHERE issue_id=? ORDER BY created_at ASC`).all(issue.id) as any[];
+        if (responses.length > 0) {
+          out += `  - Responses:\n`;
+          for (const response of responses) {
+            const timestamp = new Date(response.created_at).toISOString();
+            const internal = response.is_internal ? ' (internal)' : '';
+            out += `    - ${timestamp} by ${response.created_by} (${response.response_type}): "${response.content}"${internal}\n`;
+          }
+        }
+        out += `\n`;
+      }
+    }
+    
     const kids = childStmt.all(r.id) as any[];
     for (const k of kids) {
       const attrs3 = [`state: ${k.state}`];
@@ -752,7 +1025,7 @@ export class DB {
     out += `\n`;
   }
   return out;
-  }
+}
 
   patchTask(id: string, operations: any, ifVclock: number): { ok: boolean; vclock?: number; error?: string; details?: any } {
     const task = this.getTask(id);

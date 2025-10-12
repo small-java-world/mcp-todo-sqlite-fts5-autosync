@@ -6,6 +6,7 @@ import path from 'path';
 import bonjour from 'bonjour-service';
 import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
+import { ReviewIssuesManager } from './utils/review-issues.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
@@ -14,6 +15,7 @@ const EXPORT_DIR = process.env.EXPORT_DIR || path.join('data','snapshots');
 const SHADOW_PATH = process.env.SHADOW_PATH || path.join('data','shadow','TODO.shadow.md');
 
 const db = new DB('data', 'todo.db', path.join('data','cas'));
+const issuesManager = new ReviewIssuesManager(db.db);
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
 
@@ -189,6 +191,122 @@ case 'list_archived': {
   catch (e: any) { send(err(e.code||500, e.message||'error', id)); }
   break;
 }
+        case 'create_issue': {
+          requireAuth(params);
+          const { task_id, review_id, title, description, priority, category, severity, due_date, tags, created_by } = params || {};
+          if (!task_id || !title) { send(err(400,'missing_required_fields', id)); break; }
+          try {
+            const result = issuesManager.createIssue({
+              task_id, review_id, title, description, priority, category, severity,
+              created_by: created_by || 'system', due_date, tags, status: 'open'
+            });
+            send(ok({ issue_id: result.id, created_at: result.created_at }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'update_issue': {
+          requireAuth(params);
+          const { issue_id, ...updates } = params || {};
+          if (!issue_id) { send(err(400,'missing_issue_id', id)); break; }
+          try {
+            const result = issuesManager.updateIssue(issue_id, updates);
+            send(ok({ ok: result.ok }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'resolve_issue': {
+          requireAuth(params);
+          const { issue_id, resolved_by, resolution_note } = params || {};
+          if (!issue_id || !resolved_by) { send(err(400,'missing_required_fields', id)); break; }
+          try {
+            const result = issuesManager.resolveIssue(issue_id, resolved_by, resolution_note);
+            send(ok({ ok: result.ok }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'close_issue': {
+          requireAuth(params);
+          const { issue_id, closed_by, close_reason } = params || {};
+          if (!issue_id || !closed_by) { send(err(400,'missing_required_fields', id)); break; }
+          try {
+            const result = issuesManager.closeIssue(issue_id, closed_by, close_reason);
+            send(ok({ ok: result.ok }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'add_issue_response': {
+          requireAuth(params);
+          const { issue_id, response_type, content, created_by, is_internal, attachment_sha256 } = params || {};
+          if (!issue_id || !response_type || !content || !created_by) { send(err(400,'missing_required_fields', id)); break; }
+          try {
+            const result = issuesManager.addResponse({
+              issue_id, response_type, content, created_by, is_internal, attachment_sha256
+            });
+            send(ok({ response_id: result.id, created_at: result.created_at }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'get_issue': {
+          requireAuth(params);
+          const { issue_id } = params || {};
+          if (!issue_id) { send(err(400,'missing_issue_id', id)); break; }
+          try {
+            const issue = issuesManager.getIssue(issue_id);
+            if (!issue) { send(err(404,'issue_not_found', id)); break; }
+            send(ok({ issue }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'get_issues': {
+          requireAuth(params);
+          const { task_id, status, priority, category, created_by, limit, offset } = params || {};
+          if (!task_id) { send(err(400,'missing_task_id', id)); break; }
+          try {
+            const issues = issuesManager.getIssuesByTask(task_id, {
+              status, priority, category, created_by, limit, offset
+            });
+            send(ok({ issues }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'get_issue_responses': {
+          requireAuth(params);
+          const { issue_id, include_internal } = params || {};
+          if (!issue_id) { send(err(400,'missing_issue_id', id)); break; }
+          try {
+            const responses = issuesManager.getIssueResponses(issue_id, include_internal);
+            send(ok({ responses }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'search_issues': {
+          requireAuth(params);
+          const { q, filters, limit, offset } = params || {};
+          if (!q) { send(err(400,'missing_query', id)); break; }
+          try {
+            const issues = issuesManager.searchIssues(q, { ...filters, limit, offset });
+            send(ok({ issues }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'importTodoMd': {
+          requireAuth(params);
+          const { content } = params || {};
+          if (!content) { send(err(400,'missing_content', id)); break; }
+          try {
+            const result = db.importTodoMd(content);
+            send(ok(result, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
+        case 'exportTodoMd': {
+          requireAuth(params);
+          try {
+            const result = db.exportTodoMd();
+            send(ok(result, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
         default:
           send(err(-32601,'method_not_found', id));
       }
