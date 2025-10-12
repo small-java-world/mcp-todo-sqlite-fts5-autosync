@@ -307,6 +307,15 @@ case 'list_archived': {
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
         }
+        case 'poll_changes': {
+          requireAuth(params);
+          const { since = 0, limit = 200 } = params || {};
+          try {
+            const changes = db.pollChanges(since, limit);
+            send(ok({ changes }, id));
+          } catch (e: any) { send(err(500, e.message || 'error', id)); }
+          break;
+        }
         default:
           send(err(-32601,'method_not_found', id));
       }

@@ -36,10 +36,11 @@ export class DB {
   pragma() {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('foreign_keys = ON');
     this.db.pragma('temp_store = MEMORY');
     // cache_size: negative means KB
-    this.db.pragma('cache_size = -200000'); // ~200MB
-    // some platforms ignore mmap_size via better-sqlite3, acceptable
+    this.db.pragma('cache_size = -20000'); // ~20MB
+    this.db.pragma('mmap_size = 3000000000'); // ~3GB
   }
 
   initSchema() {
@@ -51,6 +52,7 @@ export class DB {
       done INTEGER NOT NULL DEFAULT 0,
       meta TEXT,
       vclock INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       parent_id TEXT,
       level INTEGER NOT NULL DEFAULT 2,
@@ -59,10 +61,19 @@ export class DB {
       due_at INTEGER,
       archived INTEGER NOT NULL DEFAULT 0
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(id, title, text, content='tasks', content_rowid='rowid');
+    -- External content FTS5 (no content duplication)
+    CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+      id UNINDEXED,
+      title,
+      text,
+      meta,
+      content='tasks',
+      content_rowid='rowid',
+      tokenize='unicode61 remove_diacritics 2'
+    );
     CREATE TABLE IF NOT EXISTS blobs (
       sha256 TEXT PRIMARY KEY,
-      size INTEGER NOT NULL,
+      bytes INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS task_blobs (
@@ -70,12 +81,22 @@ export class DB {
       sha256 TEXT NOT NULL,
       PRIMARY KEY(task_id, sha256)
     );
+    -- Change feed
+    CREATE TABLE IF NOT EXISTS changes (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      entity TEXT NOT NULL,
+      id TEXT NOT NULL,
+      op TEXT NOT NULL,
+      vclock INTEGER
+    );
     `;
     this.db.exec(sql);
 
     // Backfill columns for pre-existing databases
 try { this.db.exec(`ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN created_at INTEGER;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE archived_tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
 this.db.exec(`
   CREATE TABLE IF NOT EXISTS archived_tasks (
@@ -184,17 +205,21 @@ this.db.exec(`
   CREATE INDEX IF NOT EXISTS idx_issue_relations_source ON issue_relations(source_issue_id);
   CREATE INDEX IF NOT EXISTS idx_issue_relations_target ON issue_relations(target_issue_id);
 `);
-    // Triggers to sync FTS with base table
+    // FTS sync triggers
     this.db.exec(`
       CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
-        INSERT INTO tasks_fts(rowid, id, title, text) VALUES (new.rowid, new.id, new.title, new.text);
+        INSERT INTO tasks_fts(rowid, id, title, text, meta)
+        VALUES (new.rowid, new.id, new.title, new.text, COALESCE(new.meta, ''));
       END;
       CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
-        INSERT INTO tasks_fts(tasks_fts, rowid, id, title, text) VALUES('delete', old.rowid, old.id, old.title, old.text);
+        INSERT INTO tasks_fts(tasks_fts, rowid, id, title, text, meta)
+        VALUES('delete', old.rowid, old.id, old.title, old.text, COALESCE(old.meta, ''));
       END;
       CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
-        INSERT INTO tasks_fts(tasks_fts, rowid, id, title, text) VALUES('delete', old.rowid, old.id, old.title, old.text);
-        INSERT INTO tasks_fts(rowid, id, title, text) VALUES (new.rowid, new.id, new.title, new.text);
+        INSERT INTO tasks_fts(tasks_fts, rowid, id, title, text, meta)
+        VALUES('delete', old.rowid, old.id, old.title, old.text, COALESCE(old.meta, ''));
+        INSERT INTO tasks_fts(rowid, id, title, text, meta)
+        VALUES (new.rowid, new.id, new.title, new.text, COALESCE(new.meta, ''));
       END;
     `);
   }
@@ -240,6 +265,10 @@ this.db.exec(`
       if (st !== row.state) {
         this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at) VALUES (?,?,?,?)`).run(id, row.state, st, now);
       }
+      
+      // 変更フィードに記録
+      this.insertChange('task', id, 'update', vclock);
+      
       return vclock;
     } else {
       const vclock = 1;
@@ -251,9 +280,13 @@ this.db.exec(`
       const metaJson = meta === undefined ? null : meta === null ? null : JSON.stringify(meta);
 
       this.db
-        .prepare(`INSERT INTO tasks(id,title,text,done,meta,vclock,updated_at,parent_id,level,state,assignee,due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, title, text, 0, metaJson, vclock, now, pid, lvl, st, asg, due);
+        .prepare(`INSERT INTO tasks(id,title,text,done,meta,vclock,created_at,updated_at,parent_id,level,state,assignee,due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, title, text, 0, metaJson, vclock, now, now, pid, lvl, st, asg, due);
       this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at) VALUES (?,?,?,?)`).run(id, null, st, now);
+      
+      // 変更フィードに記録
+      this.insertChange('task', id, 'insert', vclock);
+      
       return vclock;
     }
   }
@@ -1112,6 +1145,29 @@ exportTodoMd(): string {
     }
 
     return { ok: true, vclock: newVclock };
+  }
+
+  // Change feed methods
+  insertChange(entity: string, id: string, op: string, vclock?: number) {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO changes (ts, entity, id, op, vclock) 
+      VALUES (?, ?, ?, ?, ?)
+    `).run(now, entity, id, op, vclock || null);
+    return now;
+  }
+
+  pollChanges(since: number = 0, limit: number = 200) {
+    return this.db.prepare(`
+      SELECT * FROM changes 
+      WHERE seq > ? 
+      ORDER BY seq ASC 
+      LIMIT ?
+    `).all(since, limit);
+  }
+
+  close() {
+    this.db.close();
   }
 }
 
