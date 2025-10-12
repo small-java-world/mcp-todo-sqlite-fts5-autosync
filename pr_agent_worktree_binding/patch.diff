@@ -1,0 +1,172 @@
+*** Begin Patch
+*** Add File: AGENT_BINDING.md
++# Agent Binding for Git Worktree
++
++## 目的
++`TODO.md` から参照されるファイル（例: `docs/specs/...`）は、**現在の worktree が束縛する Git ブランチ**にコミットされるべきです。  
++MCP サーバはエージェントに以下のバインディング情報を提供し、AI/エージェントが「どのブランチへコミットすべきか」を機械的に理解できるようにします。
++
++## 提供情報（RPC: `get_repo_binding`）
++- `repoRoot`: 作業ルート（絶対パス；worktree のルート）
++- `branch`: 現在のブランチ名（例: `feature/search-bm25`）
++- `remote`: push 先（例: `origin`）
++- `policy`:
++  - `commitOnWrite: boolean` … ファイル生成/更新時に即コミットするか
++  - `safeGlobs: string[]` … 生成/更新を許可するパスのグロブ
++  - `messageTemplate: string` … コミットメッセージのテンプレート
++  - `signoff: boolean` … `--signoff` を付けるか
++
++## ファイル参照規約
++- `TODO.md` 内の相対パスは **常に `repoRoot` からの相対パス**として解決する。
++- 明示的に `repo://path/to/file` というスキーム指定も許可（これも `repoRoot` 基準）。
++- 生成・更新対象は `policy.safeGlobs` に合致している必要がある。
++
++## コミット規約
++1. 変更が生じたら `git add` → `git commit -m "<template適用>"`（`policy.commitOnWrite` が true の場合）
++2. コミットメッセージは `messageTemplate` を適用する。  
++   例: `"chore(todos): {summary}
+
+Refs: {taskIds}
+
+{signoff}"`
++   - `{summary}`: タスク要約
++   - `{taskIds}`: `TODO.md` のタスクID（例: `T-20251012-001`）の列挙
++   - `{signoff}`: `Signed-off-by: ...`（`signoff` が true の場合）
++
++## 最低限のエージェント実装フロー
++1. `get_repo_binding` を呼んで repo/branch/policy を取得
++2. `TODO.md` に記載の参照ファイル（相対 or `repo://`）を `repoRoot` 配下に生成/更新
++3. `policy.commitOnWrite` が true なら即コミット（必要に応じて push）
++4. すべてのコミットには `{taskIds}`（`TODO.md` の一意ID）を含める
++
+*** End Patch
+*** Begin Patch
+*** Add File: AGENT_PROTOCOL.md
++# MCP Agent Protocol (Promptable Rules)
++
++本書は、MCP エージェント（およびそれを利用するAIツール）が `TODO.md` を中核に作業する際の**明文化された運用規約**です。
++
++## Golden Rules
++1. 起動時に **必ず** `get_repo_binding` を実行して `repoRoot/branch/policy` を取得すること。
++2. `TODO.md` からのファイル参照（相対/`repo://`）は **`repoRoot` 基準**で解決すること。
++3. ファイル生成・更新後、`policy.commitOnWrite=true` の場合は **同一ブランチ**へ即時コミットすること。
++4. コミットメッセージは `messageTemplate` を用い、`{taskIds}` に `TODO.md` のタスクIDを必ず含めること。
++5. 変更が無いコミットは禁止。push は任意（CI 連動時は推奨）。
++
++## `TODO.md` のタスク行の書式（抜粋）
++- `- [ ] [T-YYYYMMDD-###] 要約 ...  :: state:open; prio:1; owner:you`
++- 1行1タスク・IDは不変。末尾の `:: key:val; ...` は機械可読メタ。
++
++## エージェントが使う主な RPC（例）
++- `get_repo_binding() -> { repoRoot, branch, remote, policy }`
++- `reserve_ids(n) -> { ids: string[] }` … 中央採番（オンライン）
++- `patch_todo_section({ section, base_sha256, ops[] }) -> { vclock, sha256 }` … 行単位パッチ
++
+*** End Patch
+*** Begin Patch
+*** Update File: README.md
+@@
+ ## JSON-RPC メソッド（抜粋）
+@@
+ - `attach_blob({ taskId, base64, sha256 })`
+ - `poll_changes({ since, limit? })`
++- `get_repo_binding()` → **Git worktree バインディング**（repoRoot/branch/policy）
++- `reserve_ids({ n })` → **TODO用IDの中央採番**（例: `T-YYYYMMDD-###`）
++- `patch_todo_section({ section, base_sha256, ops[] })` → **TODO.mdの行パッチ**（3階層＋1行1タスク前提）
+@@
+ ## 追加ドキュメント
+ - `AGENT_BINDING.md` … エージェントが **「TODO由来のファイルは紐づくブランチにコミット」** を理解するための仕様
+ - `AGENT_PROTOCOL.md` … エージェント/AI向けの運用プロトコル（Golden Rules と使用RPC）
+*** End Patch
+*** Begin Patch
+*** Update File: src/config.ts
+@@
+   token: process.env.MCP_TOKEN || "changeme",
+   dataDir: process.env.DATA_DIR || "./data",
++  git: {
++    worktreeRoot: process.env.GIT_WORKTREE_ROOT || process.cwd(),
++    branch: process.env.GIT_BRANCH || "unknown",
++    remote: process.env.GIT_REMOTE || "origin",
++    policy: {
++      commitOnWrite: (process.env.GIT_COMMIT_ON_WRITE || "true") === "true",
++      safeGlobs: (process.env.GIT_SAFE_GLOBS || "docs/**,src/**,.github/**").split(","),
++      messageTemplate: process.env.GIT_COMMIT_TEMPLATE || "chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}",
++      signoff: (process.env.GIT_SIGNOFF || "true") === "true",
++    }
++  }
+ };
+*** End Patch
+*** Begin Patch
+*** Update File: src/server.ts
+@@
+-        case 'upsert_task': {
++        case 'get_repo_binding': {
++          return reply({
++            repoRoot: CONFIG.git.worktreeRoot,
++            branch: CONFIG.git.branch,
++            remote: CONFIG.git.remote,
++            policy: CONFIG.git.policy,
++          });
++        }
++        case 'reserve_ids': {
++          const n = Math.max(1, Math.min(100, (params?.n ?? 1)));
++          const ymd = new Date().toISOString().slice(0,10).replace(/-/g,'');
++          const ids: string[] = [];
++          for (let i=0;i<n;i++){
++            const tail = String((Date.now()%100000)+i).padStart(3,'0');
++            ids.push(`T-${ymd}-${tail}`);
++          }
++          return reply({ ids });
++        }
++        case 'patch_todo_section': {
++          const shape = z.object({
++            section: z.enum(['PLAN','CONTRACT','TEST','TASKS']),
++            base_sha256: z.string().optional().default(''),
++            ops: z.array(z.object({
++              op: z.literal('replaceLines'),
++              start: z.number().int().min(0),
++              end: z.number().int().min(0),
++              text: z.string()
++            })).nonempty()
++          });
++          const input = shape.parse(params);
++          // @ts-ignore
++          global.__TODO_STATE__ = global.__TODO_STATE__ || {
++            vclock: 0,
++            sha256: '',
++            sections: new Map<string,string[]>([['PLAN',[]],['CONTRACT',[]],['TEST',[]],['TASKS',[]]]),
++          };
++          // @ts-ignore
++          const state = global.__TODO_STATE__;
++          if (input.base_sha256 && input.base_sha256 !== state.sha256) {
++            const e:any=new Error('Conflict'); e.code=40901; throw e;
++          }
++          const lines: string[] = (state.sections.get(input.section) || []).slice();
++          for (const op of input.ops) {
++            lines.splice(op.start, op.end - op.start, ...op.text.split(/\r?\n/));
++          }
++          if (input.section === 'TASKS') {
++            for (const L of lines) {
++              if (!/^(\s{2}){0,2}- \[( |x)\] \[T-[A-Z0-9\-]+\]/.test(L)) {
++                const e:any=new Error('TASKS format error'); e.code=40010; throw e;
++              }
++            }
++          }
++          state.sections.set(input.section, lines);
++          state.vclock += 1;
++          const crypto = await import('crypto');
++          const nextSha = crypto.createHash('sha256').update(
++            ['PLAN','CONTRACT','TEST','TASKS'].map(s => (state.sections.get(s)||[]).join('\n')).join('\n#--\n')
++          ).digest('hex');
++          state.sha256 = nextSha;
++          const now = Date.now();
++          publishChange({ entity:'todo', id:input.section, op:'update', ts:now, vclock:state.vclock, section: input.section });
++          return reply({ vclock: state.vclock, sha256: nextSha });
++        }
++        case 'upsert_task': {
+           const shape = z.object({ task: TaskSchema, if_vclock: z.number().int().nullable().optional() });
+           const input = shape.parse(params);
+           const res = upsertTask(input.task, input.if_vclock ?? null);
+           return reply(res);
+         }
+*** End Patch
