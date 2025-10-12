@@ -19,6 +19,8 @@ MCP_TOKEN=devtoken pnpm start
 > mDNS で `ws://mcp-hub.local:8765` にしたい場合は Bonjour を有効化（デフォルト有効）。
 
 ## 2) API（JSON-RPC 2.0）
+
+### 基本API
 - `register({worker_id, authToken?}) -> {ok, session}`
 - `upsert_task({id, title, text, meta?, if_vclock?}) -> {vclock}`
 - `get_task({id}) -> {task, blobs}`
@@ -26,6 +28,24 @@ MCP_TOKEN=devtoken pnpm start
 - `mark_done({id, done, if_vclock?}) -> {vclock}`
 - `attach_blob({id, sha256?, bytes_base64?}) -> {sha256, ok}`
 - `get_blob({sha256}) -> {bytes_base64, size}`
+
+### パッチAPI
+- `patch_task({id, operations, if_vclock}) -> {ok, vclock}` - 部分更新（set, append, merge, delete, replace）
+
+### レビュー指摘API
+- `create_issue({task_id, title, description?, priority?, category?, severity?, due_date?, tags?, created_by}) -> {issue_id, created_at}`
+- `update_issue({issue_id, title?, description?, priority?, category?, severity?, due_date?, tags?}) -> {ok}`
+- `resolve_issue({issue_id, resolved_by, note?}) -> {ok}`
+- `close_issue({issue_id, closed_by, note?}) -> {ok}`
+- `add_issue_response({issue_id, response_type, content, created_by, is_internal?}) -> {response_id, created_at}`
+- `get_issue({issue_id}) -> {issue}`
+- `get_issues({task_id?, status?, priority?, category?, limit?, offset?}) -> {issues}`
+- `get_issue_responses({issue_id, include_internal?}) -> {responses}`
+- `search_issues({q, filters?, limit?, offset?}) -> {issues}`
+
+### TODO.md インポート/エクスポートAPI
+- `importTodoMd({content}) -> {ok}` - TODO.md形式のインポート
+- `exportTodoMd() -> {content}` - TODO.md形式のエクスポート
 
 vclock はタスクごとの単調増加バージョン（楽観ロック）。`if_vclock` 不一致なら 409 を返します。
 
@@ -63,7 +83,33 @@ data/
 - `set_state({ id, to_state, by?, note? }) -> { vclock }`
 - `add_review({ task_id, decision, by, note? })`
 - `add_comment({ task_id, by, text })`
-- `import_todo_md({ bytes_base64 })` / `export_todo_md()`
+
+## 8) レビュー指摘機能
+
+### 指摘の作成・管理
+- タスクに関連する指摘（Issue）を作成・更新・解決・クローズ
+- 指摘に対する応答（Response）の追加
+- 指摘の検索・フィルタリング
+- 内部メモ（Internal Notes）のサポート
+
+### TODO.md での指摘管理
+```
+### Issues:
+
+#### Issue 1: Database Performance
+- **Status**: Open
+- **Priority**: High
+- **Category**: Performance
+- **Severity**: High
+- **Created**: 2025-01-16T09:00:00Z by reviewer1
+- **Description**: Database queries are too slow
+- **Tags**: performance, database
+
+**Responses:**
+- 2025-01-16T10:00:00Z by developer1: I'll optimize the queries
+- 2025-01-16T11:00:00Z by reviewer1: Please add indexes
+- 2025-01-16T12:00:00Z by developer1 (internal): Working on it
+```
 
 ### TODO.md 例（インポート可能）
 ```
@@ -75,7 +121,7 @@ data/
 ```
 
 
-## 8) TODO.md Import/Export CLI
+## 9) TODO.md Import/Export CLI
 - Export (mac): `./scripts/mac/export_todo.sh [OUT.md]`
 - Import (mac): `./scripts/mac/import_todo.sh [IN.md]`
 - Export (Win): `.\scripts\win\export_todo.ps1 -OutPath OUT.md`
@@ -84,7 +130,7 @@ data/
 環境変数: `MCP_URL` (既定 `ws://127.0.0.1:8765`), `MCP_TOKEN` (既定 `devtoken`)
 
 
-## 9) 安全な同期（サーバ停止時の自動エクスポート & 影コピー）
+## 10) 安全な同期（サーバ停止時の自動エクスポート & 影コピー）
 - サーバは **停止時(SIGINT/SIGTERM)** に、DB内容の TODO を Markdown として**影コピー**へ書き出し、さらに **スナップショット**を `data/snapshots/` に保存します。
 - 既定の保存先：
   - 影コピー: `data/shadow/TODO.shadow.md`（上書きだが**一時ファイル→rename**で安全）
@@ -98,9 +144,32 @@ data/
 - `server_sync_export` … サーバ側で上記と同じ処理を即時実行。
 
 
-## 10) MCP設定（Cursor / Claude Desktop / Codex CLI）
+## 11) テスト
 
-### 10.1 Cursor設定
+### ユニットテスト
+```bash
+npm test
+```
+
+### 統合テスト
+```bash
+# サーバー起動
+npm start
+
+# 別ターミナルで統合テスト実行
+npm test test/integration/
+```
+
+### テストカバレッジ
+- 基本機能（CRUD、検索、アーカイブ）
+- パッチ機能（部分更新）
+- レビュー指摘機能（作成、更新、解決、クローズ、応答）
+- TODO.md インポート/エクスポート機能
+- メタ構造化、タイムライン、関連、ノート機能
+
+## 12) MCP設定（Cursor / Claude Desktop / Codex CLI）
+
+### 12.1 Cursor設定
 
 #### ローカル接続
 ```json
@@ -140,7 +209,7 @@ data/
 - macOS: `~/Library/Application Support/Cursor/User/settings.json`
 - Linux: `~/.config/Cursor/User/settings.json`
 
-### 10.2 Claude Desktop設定
+### 12.2 Claude Desktop設定
 
 #### ローカル接続
 ```json
@@ -180,7 +249,7 @@ data/
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
 - Linux: `~/.config/claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
 
-### 10.3 Codex CLI設定
+### 12.3 Codex CLI設定
 
 #### ローカル接続
 ```bash
@@ -202,7 +271,7 @@ export MCP_TOKEN="devtoken"
 codex --mcp-server-url $MCP_SERVER_URL --mcp-token $MCP_TOKEN
 ```
 
-### 10.4 リモート接続のための設定
+### 12.4 リモート接続のための設定
 
 #### サーバー側（MCP TODO Server）
 ```bash
@@ -224,7 +293,7 @@ $env:MCP_SERVER_IP="192.168.1.9"; node remote_client.js
 2. **IPアドレス確認**: `ipconfig` (Windows) / `ifconfig` (macOS/Linux)
 3. **ネットワーク確認**: 同一ネットワーク内であることを確認
 
-### 10.5 トラブルシューティング
+### 12.5 トラブルシューティング
 
 #### 接続エラーの場合
 1. **ファイアウォール確認**: ポート8765が開放されているか
