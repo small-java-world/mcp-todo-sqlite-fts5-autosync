@@ -7,6 +7,7 @@ import bonjour from 'bonjour-service';
 import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
 import { ReviewIssuesManager } from './utils/review-issues.js';
+import { CONFIG } from './config.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
@@ -315,6 +316,74 @@ case 'list_archived': {
             send(ok({ changes }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
+        }
+        case 'get_repo_binding': {
+          return send(ok({
+            repoRoot: CONFIG.git.worktreeRoot,
+            branch: CONFIG.git.branch,
+            remote: CONFIG.git.remote,
+            policy: CONFIG.git.policy,
+          }, id));
+        }
+        case 'reserve_ids': {
+          const n = Math.max(1, Math.min(100, (params?.n ?? 1)));
+          const ymd = new Date().toISOString().slice(0,10).replace(/-/g,'');
+          const ids: string[] = [];
+          for (let i=0;i<n;i++){
+            const tail = String((Date.now()%100000)+i).padStart(3,'0');
+            ids.push(`T-${ymd}-${tail}`);
+          }
+          return send(ok({ ids }, id));
+        }
+        case 'patch_todo_section': {
+          const section = params?.section;
+          const base_sha256 = params?.base_sha256 || '';
+          const ops = params?.ops || [];
+          
+          if (!['PLAN','CONTRACT','TEST','TASKS'].includes(section)) {
+            return send(err(400, 'invalid_section', id));
+          }
+          
+          // @ts-ignore
+          global.__TODO_STATE__ = global.__TODO_STATE__ || {
+            vclock: 0,
+            sha256: '',
+            sections: new Map<string,string[]>([['PLAN',[]],['CONTRACT',[]],['TEST',[]],['TASKS',[]]]),
+          };
+          
+          // @ts-ignore
+          const state = global.__TODO_STATE__;
+          if (base_sha256 && base_sha256 !== state.sha256) {
+            return send(err(409, 'conflict', id));
+          }
+          
+          const lines: string[] = (state.sections.get(section) || []).slice();
+          for (const op of ops) {
+            if (op.op === 'replaceLines') {
+              lines.splice(op.start, op.end - op.start, ...op.text.split(/\r?\n/));
+            }
+          }
+          
+          if (section === 'TASKS') {
+            for (const L of lines) {
+              if (!/^(\s{2}){0,2}- \[( |x)\] \[T-[A-Z0-9\-]+\]/.test(L)) {
+                return send(err(400, 'TASKS format error', id));
+              }
+            }
+          }
+          
+          state.sections.set(section, lines);
+          state.vclock += 1;
+          const nextSha = crypto.createHash('sha256').update(
+            ['PLAN','CONTRACT','TEST','TASKS'].map(s => (state.sections.get(s)||[]).join('\n')).join('\n#--\n')
+          ).digest('hex');
+          state.sha256 = nextSha;
+          
+          const now = Date.now();
+          // 変更フィードに記録
+          db.insertChange('todo', section, 'update', state.vclock);
+          
+          return send(ok({ vclock: state.vclock, sha256: nextSha }, id));
         }
         default:
           send(err(-32601,'method_not_found', id));
