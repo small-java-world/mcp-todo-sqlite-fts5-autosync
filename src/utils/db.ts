@@ -113,6 +113,23 @@ export class DB {
     by TEXT,
     note TEXT
   );
+  CREATE TABLE IF NOT EXISTS task_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    note TEXT,
+    UNIQUE(task_id, target_id, relation)
+  );
+  CREATE TABLE IF NOT EXISTS task_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    author TEXT NOT NULL,
+    body TEXT NOT NULL,
+    is_internal BOOLEAN DEFAULT 0
+  );
 `);
     // Triggers to sync FTS with base table
     this.db.exec(`
@@ -300,10 +317,23 @@ export class DB {
     if (row.state === to_state) return { vclock: row.vclock };
     const ts = at ?? Date.now();
     const vclock = row.vclock + 1;
-    this.db.prepare(`UPDATE tasks SET state=?, done=?, vclock=?, updated_at=? WHERE id=?`)
-      .run(to_state, to_state === 'DONE' ? 1 : 0, vclock, ts, id);
-    this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at, by, note) VALUES (?,?,?,?,?,?)`)
-      .run(id, row.state, to_state, ts, by ?? null, note ?? null);
+    
+    // Check for duplicate state change (same timestamp and same state change)
+    const existing = this.db.prepare(`
+      SELECT COUNT(*) as count FROM task_state_history 
+      WHERE task_id = ? AND from_state = ? AND to_state = ? AND at = ? AND by = ?
+    `).get(id, row.state, to_state, ts, by ?? null);
+    
+    if (existing.count === 0) {
+      this.db.prepare(`UPDATE tasks SET state=?, done=?, vclock=?, updated_at=? WHERE id=?`)
+        .run(to_state, to_state === 'DONE' ? 1 : 0, vclock, ts, id);
+      this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at, by, note) VALUES (?,?,?,?,?,?)`)
+        .run(id, row.state, to_state, ts, by ?? null, note ?? null);
+    } else {
+      // Duplicate found, just update vclock without inserting history
+      this.db.prepare(`UPDATE tasks SET vclock=? WHERE id=?`)
+        .run(vclock, id);
+    }
     return { vclock };
   }
 
@@ -352,20 +382,45 @@ export class DB {
   const reL2 = /^## \[(.+?)\]\s+(.*?)\s*\{([^}]*)\}\s*$/;
   const reL3 = /^### \[(.+?)\]\s+(.*?)\s*\{([^}]*)\}\s*$/;
   const reMeta = /^Meta:\s*$/i;
+  const reTimeline = /^Timeline:\s*$/i;
+  const reRelated = /^Related:\s*$/i;
+  const reRelatedWithContent = /^Related:\s+.+$/i;
+  const reNotes = /^Notes:\s*$/i;
   const reReviewHdr = /^####\s+Reviews\s*$/i;
   const reReview = /^-\s+review@([^\s]+)\s+by\s+(\S+)\s*=>\s*(\S+)(?:\s+(.+))?$/i;
   const reComment = /^-\s+comment@([^\s]+)\s+by\s+(\S+):\s*"(.+)"\s*$/i;
 
+  // Timeline parsing
+  const reTimelineEvent = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/;
+  const reTimelineState = /^STATE\s+(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+  const reTimelineReview = /^REVIEW\s+(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+  const reTimelineComment = /^COMMENT\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+  const reTimelineArchive = /^ARCHIVE\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+  const reTimelineRestore = /^RESTORE\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+
+  // Related parsing
+  const reRelatedItem = /^-\s+\[([^\]]+)\](?:\s+\(([^)]+)\))?$/;
+  const reRelatedSingle = /^Related:\s*\[([^\]]+)\](?:\s+\[([^\]]+)\])*(?:\s+\[([^\]]+)\])*$/;
+
+  // Notes parsing
+  const reNoteItem = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/;
+  const reNoteInternal = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/;
+
   let inMeta = false;
+  let inTimeline = false;
+  let inRelated = false;
+  let inNotes = false;
   let metaAccum: any = {};
   let inReviews = false;
+  let metaJson = '';
+  let inMetaJson = false;
 
   for (let i=0;i<lines.length;i++) {
     const line = lines[i];
 
     if (line.startsWith('# ') && !line.startsWith('##')) {
       currentSection = line.replace(/^#\s+/, '').trim();
-      inMeta = false; inReviews=false;
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
       continue;
     }
     const m2 = line.match(reL2);
@@ -377,7 +432,7 @@ export class DB {
       const due = attrs.due ? isoToEpoch(attrs.due) : null;
       this.upsertTask(id, title, '', null, undefined, { parent_id: null, level: 2, state, assignee, due_at: due });
       lastTaskId = id;
-      inMeta = false; inReviews=false; metaAccum = {};
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; metaAccum = {};
       continue;
     }
     const m3 = line.match(reL3);
@@ -390,11 +445,43 @@ export class DB {
       // parent is last L2
       const parent = lastTaskId;
       this.upsertTask(id, title, '', null, undefined, { parent_id: parent ?? null, level: 3, state, assignee, due_at: due });
-      inMeta = false; inReviews=false;
+      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
       continue;
     }
     if (reMeta.test(line)) {
-      inMeta = true; inReviews=false;
+      inMeta = true; inTimeline = false; inRelated = false; inNotes = false; inReviews=false;
+      continue;
+    }
+    if (reTimeline.test(line)) {
+      inTimeline = true; inMeta = false; inRelated = false; inNotes = false; inReviews=false;
+      continue;
+    }
+    if (reRelated.test(line)) {
+      inRelated = true; inMeta = false; inTimeline = false; inNotes = false; inReviews=false;
+      continue;
+    }
+    if (reRelatedWithContent.test(line)) {
+      // Handle single line Related format
+      const relatedText = line.replace(/^Related:\s*/i, '').trim();
+      const idMatches = relatedText.match(/\[([^\]]+)\]/g);
+      if (idMatches && lastTaskId) {
+        const now = Date.now();
+        for (const idMatch of idMatches) {
+          const targetId = idMatch.slice(1, -1); // Remove [ and ]
+          try {
+            this.db.prepare(`
+              INSERT INTO task_links (task_id, target_id, relation, created_at, note)
+              VALUES (?, ?, ?, ?, ?)
+            `).run(lastTaskId, targetId, 'related to', now, null);
+          } catch (e) {
+            // Ignore duplicate links
+          }
+        }
+      }
+      continue;
+    }
+    if (reNotes.test(line)) {
+      inNotes = true; inMeta = false; inTimeline = false; inRelated = false; inReviews=false;
       continue;
     }
     if (reReviewHdr.test(line)) {
@@ -402,7 +489,163 @@ export class DB {
       continue;
     }
     if (inMeta && line.trim()) {
-      // Skip meta lines
+      // Meta JSON parsing
+      if (line.trim().startsWith('```json')) {
+        inMetaJson = true;
+        metaJson = '';
+        continue;
+      }
+      if (line.trim().startsWith('```') && inMetaJson) {
+        inMetaJson = false;
+        try {
+          const meta = JSON.parse(metaJson);
+          if (lastTaskId) {
+            this.db.prepare('UPDATE tasks SET meta = ? WHERE id = ?').run(JSON.stringify(meta), lastTaskId);
+          }
+        } catch (e) {
+          console.warn('Invalid JSON in meta block:', e);
+        }
+        continue;
+      }
+      if (inMetaJson) {
+        metaJson += line + '\n';
+        continue;
+      }
+    }
+
+    if (inTimeline && line.trim()) {
+      // More flexible timeline parsing
+      const timelineMatch = line.match(/^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/);
+      if (timelineMatch && lastTaskId) {
+        const [_, timestamp, eventType, eventData, note] = timelineMatch;
+        const at = isoToEpoch(timestamp);
+        
+        // Parse event data based on event type
+        if (eventType === 'STATE') {
+          const stateMatch = eventData.match(/^(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
+          if (stateMatch) {
+            const [__, toState, by, stateNote] = stateMatch;
+            this.setState(lastTaskId, toState, by, stateNote || note, at);
+            continue;
+          }
+        } else if (eventType === 'REVIEW') {
+          const reviewMatch = eventData.match(/^(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
+          if (reviewMatch) {
+            const [__, decision, by, reviewNote] = reviewMatch;
+            this.addReview(lastTaskId, decision, by, reviewNote || note, at);
+            continue;
+          }
+        } else if (eventType === 'COMMENT') {
+          const commentMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
+          if (commentMatch) {
+            const [__, by, commentText] = commentMatch;
+            this.addComment(lastTaskId, by, commentText || note || '', at);
+            continue;
+          }
+        } else if (eventType === 'ARCHIVE') {
+          const archiveMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
+          if (archiveMatch) {
+            const [__, by, archiveNote] = archiveMatch;
+            this.archiveTask(lastTaskId, archiveNote || note);
+            continue;
+          }
+        } else if (eventType === 'RESTORE') {
+          const restoreMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
+          if (restoreMatch) {
+            const [__, by, restoreNote] = restoreMatch;
+            this.restoreTask(lastTaskId);
+            continue;
+          }
+        } else {
+          // Unknown event type - ignore silently
+          continue;
+        }
+      }
+    }
+
+    if (inRelated && line.trim()) {
+      const relatedMatch = line.match(reRelatedItem);
+      if (relatedMatch && lastTaskId) {
+        const [__, targetId, relation] = relatedMatch;
+        const now = Date.now();
+        try {
+          this.db.prepare(`
+            INSERT INTO task_links (task_id, target_id, relation, created_at, note)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(lastTaskId, targetId, relation || 'related to', now, null);
+        } catch (e) {
+          // Ignore duplicate links
+        }
+        continue;
+      }
+      
+      // Single line related format - capture all IDs
+      const singleRelatedMatch = line.match(/^Related:\s*(.+)$/);
+      if (singleRelatedMatch && lastTaskId) {
+        const relatedText = singleRelatedMatch[1].trim();
+        // Extract all [ID] patterns
+        const idMatches = relatedText.match(/\[([^\]]+)\]/g);
+        if (idMatches) {
+          const now = Date.now();
+          for (const idMatch of idMatches) {
+            const targetId = idMatch.slice(1, -1); // Remove [ and ]
+            try {
+              this.db.prepare(`
+                INSERT INTO task_links (task_id, target_id, relation, created_at, note)
+                VALUES (?, ?, ?, ?, ?)
+              `).run(lastTaskId, targetId, 'related to', now, null);
+            } catch (e) {
+              // Ignore duplicate links
+            }
+          }
+        }
+        continue;
+      }
+      
+      
+      // Alternative single line format
+      const altSingleRelatedMatch = line.match(/^Related:\s*\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]$/);
+      if (altSingleRelatedMatch && lastTaskId) {
+        const [__, ...targetIds] = altSingleRelatedMatch;
+        const now = Date.now();
+        for (const targetId of targetIds.filter(Boolean)) {
+          try {
+            this.db.prepare(`
+              INSERT INTO task_links (task_id, target_id, relation, created_at, note)
+              VALUES (?, ?, ?, ?, ?)
+            `).run(lastTaskId, targetId, 'related to', now, null);
+          } catch (e) {
+            // Ignore duplicate links
+          }
+        }
+        continue;
+      }
+    }
+
+    if (inNotes && line.trim()) {
+      // Check for internal note first (with optional indentation)
+      const internalNoteMatch = line.match(/^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/);
+      if (internalNoteMatch && lastTaskId) {
+        const [__, timestamp, author, body] = internalNoteMatch;
+        const at = isoToEpoch(timestamp);
+        this.db.prepare(`
+          INSERT INTO task_notes (task_id, at, author, body, is_internal)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(lastTaskId, at, author, body, 1);
+        continue;
+      }
+      
+      // Check for regular note (with optional indentation)
+      const noteMatch = line.match(/^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/);
+      if (noteMatch && lastTaskId) {
+        const [__, timestamp, author, body] = noteMatch;
+        const at = isoToEpoch(timestamp);
+        this.db.prepare(`
+          INSERT INTO task_notes (task_id, at, author, body, is_internal)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(lastTaskId, at, author, body, 0);
+        continue;
+      }
     }
 
     if (inReviews) {
@@ -435,26 +678,167 @@ export class DB {
     if (r.assignee) attrs.push(`assignee: ${r.assignee}`);
     if (r.due_at) attrs.push(`due: ${new Date(r.due_at).toISOString().slice(0,10)}`);
     out += `## [${r.id}] ${r.title} {${attrs.join(', ')}}\n`;
+    
+    // Meta block
+    if (r.meta) {
+      try {
+        const meta = JSON.parse(r.meta);
+        if (Object.keys(meta).length > 0) {
+          out += `\nMeta:\n\`\`\`json\n${JSON.stringify(meta, null, 2)}\n\`\`\`\n`;
+        }
+      } catch (e) {
+        // Skip invalid meta
+      }
+    }
+    
+    // Timeline block
+    const timelineEvents: string[] = [];
+    
+    // State history
+    const stateHistory = this.db.prepare(`SELECT * FROM task_state_history WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
+    for (const h of stateHistory) {
+      const timestamp = new Date(h.at).toISOString();
+      const note = h.note ? ` note "${h.note}"` : '';
+      timelineEvents.push(`- ${timestamp} | STATE ${h.to_state} by ${h.by}${note}`);
+    }
+    
+    // Reviews
+    const revs = this.db.prepare(`SELECT * FROM reviews WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
+    for (const v of revs) {
+      const timestamp = new Date(v.at).toISOString();
+      const note = v.note ? ` note "${v.note}"` : '';
+      timelineEvents.push(`- ${timestamp} | REVIEW ${v.decision} by ${v.by}${note}`);
+    }
+    
+    // Comments
+    const coms = this.db.prepare(`SELECT * FROM review_comments WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
+    for (const c of coms) {
+      const timestamp = new Date(c.at).toISOString();
+      timelineEvents.push(`- ${timestamp} | COMMENT by ${c.by} note "${c.text}"`);
+    }
+    
+    if (timelineEvents.length > 0) {
+      out += `\nTimeline:\n`;
+      for (const event of timelineEvents) {
+        out += `${event}\n`;
+      }
+    }
+    
+    // Related block
+    const links = this.db.prepare(`SELECT * FROM task_links WHERE task_id=? ORDER BY relation, target_id`).all(r.id) as any[];
+    if (links.length > 0) {
+      out += `\nRelated:\n`;
+      for (const link of links) {
+        out += `- [${link.target_id}] (${link.relation})\n`;
+      }
+    }
+    
+    // Notes block
+    const notes = this.db.prepare(`SELECT * FROM task_notes WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
+    if (notes.length > 0) {
+      out += `\nNotes:\n`;
+      for (const note of notes) {
+        const timestamp = new Date(note.at).toISOString();
+        const internal = note.is_internal ? ' (internal)' : '';
+        out += `- ${timestamp} | ${note.author}:${internal} ${note.body}\n`;
+      }
+    }
+    
     const kids = childStmt.all(r.id) as any[];
     for (const k of kids) {
       const attrs3 = [`state: ${k.state}`];
       out += `### [${k.id}] ${k.title} {${attrs3.join(', ')}}\n`;
     }
-    // reviews
-    const revs = this.db.prepare(`SELECT * FROM reviews WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
-    const coms = this.db.prepare(`SELECT * FROM review_comments WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
-    if (revs.length || coms.length) {
-      out += `\n#### Reviews\n`;
-      for (const v of revs) {
-        out += `- review@${new Date(v.at).toISOString()} by ${v.by} => ${v.decision}${v.note?(' '+v.note):''}\n`;
-      }
-      for (const c of coms) {
-        out += `- comment@${new Date(c.at).toISOString()} by ${c.by}: "${c.text}"\n`;
-      }
-    }
     out += `\n`;
   }
   return out;
+  }
+
+  patchTask(id: string, operations: any, ifVclock: number): { ok: boolean; vclock?: number; error?: string; details?: any } {
+    const task = this.getTask(id);
+    if (!task) {
+      return { ok: false, error: 'task_not_found' };
+    }
+
+    if (task.vclock !== ifVclock) {
+      return { 
+        ok: false, 
+        error: 'vclock_conflict',
+        details: { current_vclock: task.vclock }
+      };
+    }
+
+    let newVclock = task.vclock + 1;
+    let updates: any = {};
+    let newMeta = task.meta ? JSON.parse(task.meta) : {};
+
+    // set操作
+    if (operations.set) {
+      Object.assign(updates, operations.set);
+    }
+
+    // append操作
+    if (operations.append) {
+      for (const [key, value] of Object.entries(operations.append)) {
+        if (key === 'text' && updates.text) {
+          updates.text += value;
+        } else if (key === 'text') {
+          updates.text = (task.text || '') + value;
+        }
+      }
+    }
+
+    // merge操作
+    if (operations.merge) {
+      if (operations.merge.meta) {
+        newMeta = { ...newMeta, ...operations.merge.meta };
+        updates.meta = JSON.stringify(newMeta);
+      }
+      // meta以外のフィールドをマージ
+      const { meta, ...otherFields } = operations.merge;
+      Object.assign(updates, otherFields);
+    }
+
+    // delete操作
+    if (operations.delete) {
+      if (operations.delete.meta) {
+        for (const key of operations.delete.meta) {
+          delete newMeta[key];
+        }
+        updates.meta = JSON.stringify(newMeta);
+      }
+    }
+
+    // replace操作
+    if (operations.replace) {
+      if (operations.replace.meta) {
+        updates.meta = JSON.stringify(operations.replace.meta);
+      }
+      // meta以外のフィールドを置換
+      const { meta, ...otherFields } = operations.replace;
+      Object.assign(updates, otherFields);
+    }
+
+    // 無効な操作をチェック
+    const validOperations = ['set', 'append', 'merge', 'delete', 'replace'];
+    const invalidOps = Object.keys(operations).filter(op => !validOperations.includes(op));
+    if (invalidOps.length > 0) {
+      return { ok: false, error: 'invalid_operation' };
+    }
+
+    // データベースを更新
+    if (Object.keys(updates).length > 0) {
+      updates.vclock = newVclock;
+      updates.updated_at = Date.now();
+      
+      const setClause = Object.keys(updates).map(key => `${key} = ?`).join(', ');
+      const values = Object.values(updates);
+      values.push(id);
+      
+      this.db.prepare(`UPDATE tasks SET ${setClause} WHERE id = ?`).run(...values);
+    }
+
+    return { ok: true, vclock: newVclock };
   }
 }
 
