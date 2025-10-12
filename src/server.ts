@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import bonjour from 'bonjour-service';
 import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
@@ -17,6 +18,34 @@ const SHADOW_PATH = process.env.SHADOW_PATH || path.join('data','shadow','TODO.s
 
 const db = new DB('data', 'todo.db', path.join('data','cas'));
 const issuesManager = new ReviewIssuesManager(db.db);
+
+function sanitizeDirName(s: string): string {
+  return s.replace(/[^\w.\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'wt';
+}
+
+function ensureWorktreeLocally(branch: string, dirName: string, remote: string) {
+  // ブランチ前置詞の許可チェック
+  if (!CONFIG.git.allowedBranchPrefixes.some(p => branch.startsWith(p))) {
+    const e: any = new Error(`branch not allowed by prefix policy: ${branch}`); e.code = 40301; throw e;
+  }
+  const repoRoot = CONFIG.git.repoRoot;
+  const worktreesDir = path.join(repoRoot, CONFIG.git.worktreesDir);
+  const target = path.join(worktreesDir, dirName);
+  fs.mkdirSync(worktreesDir, { recursive: true });
+  const rel = path.relative(repoRoot, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    const e: any = new Error('invalid worktree target path'); e.code = 40011; throw e;
+  }
+  const hasGit = fs.existsSync(path.join(target, '.git'));
+  if (!hasGit) {
+    try {
+      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}" "${remote}/${branch}"`, { stdio: 'pipe' });
+    } catch {
+      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}"`, { stdio: 'pipe' });
+    }
+  }
+  return target;
+}
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
 
@@ -37,7 +66,7 @@ function err(code: number, message: string, id: number | string | null) { return
 
 function requireAuth(params: any) {
   if (!TOKEN) return;
-  const tok = params?.authToken || params?.session && sessions.get(params.session)?.id; // allow session reuse
+  const tok = params?.authToken || (params?.session && sessions.has(params.session) ? params.session : null); // allow session reuse
   if (!tok) throw Object.assign(new Error('unauthorized'), { code: 401 });
   if (tok !== TOKEN && !sessions.has(tok)) throw Object.assign(new Error('unauthorized'), { code: 401 });
 }
@@ -318,8 +347,20 @@ case 'list_archived': {
           break;
         }
         case 'get_repo_binding': {
+          // 既存worktreeが指定済みならそれを返す
+          let root = CONFIG.git.worktreeRoot;
+          // 未指定の場合は、autoEnsureWorktreeの設定に従い自動生成を試みる
+          if (!root || !fs.existsSync(path.join(root, '.git'))) {
+            if (CONFIG.git.autoEnsureWorktree && CONFIG.git.branch && CONFIG.git.branch !== 'unknown') {
+              const dir = sanitizeDirName(process.env.GIT_WORKTREE_NAME || CONFIG.git.branch);
+              root = ensureWorktreeLocally(CONFIG.git.branch, dir, CONFIG.git.remote);
+            } else {
+              // 自動生成しない運用では repoRoot を返す（※クライアントは ensure_worktree を明示呼び出し）
+              root = CONFIG.git.repoRoot;
+            }
+          }
           return send(ok({
-            repoRoot: CONFIG.git.worktreeRoot,
+            repoRoot: root,
             branch: CONFIG.git.branch,
             remote: CONFIG.git.remote,
             policy: CONFIG.git.policy,

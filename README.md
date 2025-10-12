@@ -179,13 +179,22 @@ npm test test/integration/
 - `AGENT_PROTOCOL.md` … エージェント/AI向けの運用プロトコル（Golden Rules と使用RPC）
 
 ### 環境変数（worktree）
-- `GIT_WORKTREE_ROOT`（必須推奨）
+- `GIT_REPO_ROOT`（プロジェクトの .git 管理側のルート。未指定時は `process.cwd()`）
+- `GIT_WORKTREES_DIR`（既定: `worktrees`）
+- `GIT_WORKTREE_ROOT`（明示worktreeがある場合に直接指定；通常は `ensure_worktree` を使用）
+- `GIT_AUTO_ENSURE_WORKTREE=true`（`get_repo_binding`で自動worktree作成を有効化）
+- `GIT_WORKTREE_NAME`（自動作成時のworktree名。未指定時はブランチ名をサニタイズ）
 - `GIT_BRANCH`（必須推奨）
 - `GIT_REMOTE=origin`
 - `GIT_COMMIT_ON_WRITE=true`
 - `GIT_SAFE_GLOBS=docs/**,src/**,.github/**`
 - `GIT_COMMIT_TEMPLATE="chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}"`
 - `GIT_SIGNOFF=true`
+- `GIT_ALLOWED_BRANCH_PREFIXES="feat/,fix/,chore/,refactor/"`（worktree作成を許可するブランチ接頭辞）
+
+## 便利RPC
+- `ensure_worktree({ branch, dirName })` → `<repoRoot>/<worktreesDir>/<dirName>` に worktree を作成（既存なら再利用）し、その worktree を `repoRoot` とするバインディングを返す。
+- `get_repo_binding()` → 既存worktreeがあれば返す。なければ`GIT_AUTO_ENSURE_WORKTREE=true`の場合、自動でworktreeを作成して返す。
 
 ## 13) MCP設定（Cursor / Claude Desktop / Codex CLI）
 

@@ -11,22 +11,31 @@ describe('Timeline Tests', () => {
   let db: DB;
   
   beforeAll(() => {
-    fs.mkdirSync(tmpDir, { recursive: true });
-    db = new DB(tmpDir, dbFile, casDir);
+    // 初期セットアップはbeforeEachで行う
   });
 
   beforeEach(() => {
     // 各テスト前にデータベースを完全にリセット
     try {
-      db.close();
+      if (db) {
+        db.close();
+      }
     } catch (e) {
       // Ignore close errors
     }
+    
+    // データベースファイルとディレクトリを削除
     try {
-      fs.rmSync(path.join(tmpDir, dbFile), { force: true });
+      if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     } catch (e) {
-      // Ignore file not found errors
+      // Ignore cleanup errors
     }
+    
+    // 新しいディレクトリとデータベースを作成
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.mkdirSync(casDir, { recursive: true });
     db = new DB(tmpDir, dbFile, casDir);
   });
 
