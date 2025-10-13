@@ -122,3 +122,15 @@
 - Webhook 連携（`requirements.updated` 等を外部へ）
 - 監査ビュー（Intent↔変更↔位相のタイムライン）
 
+---
+
+## 関連ドキュメント
+
+- TDD 位相モデル: docs/tdd_phase_model.md
+- FTS5 autosync: docs/fts5_sync.md
+- 投影の二相コミット: docs/projection_twophase.md
+- FTS検索の安全設計: docs/search_safety.md
+- vclock ポリシー: docs/vclock_policy.md
+- Ingestion Worker SLA: docs/ingestion_worker_sla.md
+- FTS プロパティテスト計画: tests/fts_property_test_plan.md
+

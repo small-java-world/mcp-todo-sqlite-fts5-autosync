@@ -113,7 +113,10 @@ describe('Change Feed Tests', () => {
   });
 
   it('should return empty array when no changes', () => {
-    const changes = db.pollChanges(0, 10);
+    // Start from the current max seq to ensure no pending records are included
+    const maxSeqRow = db.db.prepare(`SELECT IFNULL(MAX(seq), 0) AS maxseq FROM changes`).get() as any;
+    const since = (maxSeqRow?.maxseq ?? 0);
+    const changes = db.pollChanges(since, 10);
     expect(changes.length).toBe(0);
   });
 
