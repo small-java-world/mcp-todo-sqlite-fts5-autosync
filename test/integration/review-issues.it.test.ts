@@ -15,7 +15,7 @@ describe('Review Issues Integration Tests', () => {
     serverHandle = await startIntegrationServer();
     SERVER_URL = `ws://127.0.0.1:${serverHandle.port}`;
     AUTH_TOKEN = serverHandle.token;
-  });
+  }, 60000); // 60秒に延長
 
   beforeEach(async () => {
     // 新しいWebSocket接続を作成

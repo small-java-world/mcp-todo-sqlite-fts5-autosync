@@ -3,9 +3,36 @@ import { registerTodoSplitter } from '../../src/mcp/todo_splitter.js';
 import fs from 'fs';
 import path from 'path';
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function removeTempDir(dir: string) {
+  if (!fs.existsSync(dir)) return;
+
+  let lastError: NodeJS.ErrnoException | undefined;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      lastError = undefined;
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'EBUSY' && code !== 'EPERM') {
+        throw err;
+      }
+      lastError = err as NodeJS.ErrnoException;
+      await sleep(50 * (attempt + 1));
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+}
+
 describe('registerTodoSplitter', () => {
   let handlers: Map<string, (params: any, ctx?: any) => Promise<any>>;
   let testDir: string;
+  let taskletsDir: string;
 
   beforeEach(() => {
     handlers = new Map();
@@ -15,18 +42,22 @@ describe('registerTodoSplitter', () => {
     registerTodoSplitter(register);
 
     testDir = path.join(process.cwd(), '.test-output', `splitter-${Date.now()}`);
-    fs.mkdirSync(testDir, { recursive: true });
+    taskletsDir = path.join(testDir, 'tasklets');
+    fs.mkdirSync(taskletsDir, { recursive: true });
+
+    process.env.TASKLETS_DIR = taskletsDir;
   });
 
-  afterEach(() => {
-    // Cleanup test directories
+  afterEach(async () => {
+    delete process.env.TASKLETS_DIR;
+
     if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true, force: true });
+      await removeTempDir(testDir);
     }
 
-    const taskletsDir = path.join(process.cwd(), 'tasklets');
-    if (fs.existsSync(taskletsDir)) {
-      fs.rmSync(taskletsDir, { recursive: true, force: true });
+    const defaultTasklets = path.join(process.cwd(), 'tasklets');
+    if (fs.existsSync(defaultTasklets) && defaultTasklets !== taskletsDir) {
+      await removeTempDir(defaultTasklets);
     }
 
     const dataDir = path.join(process.cwd(), 'data');
@@ -42,14 +73,8 @@ describe('registerTodoSplitter', () => {
     });
 
     it('should decompose TODO.md into tasklets', async () => {
-      // Create a sample TODO.md
       const todoPath = path.join(process.cwd(), 'TODO-test.md');
-      const todoContent = `# TODO
-
-- First task
-- Second task
-- Third task
-`;
+      const todoContent = `# TODO\n\n- First task\n- Second task\n- Third task\n`;
       fs.writeFileSync(todoPath, todoContent, 'utf8');
 
       const handler = handlers.get('todo.decompose')!;
@@ -59,7 +84,6 @@ describe('registerTodoSplitter', () => {
       expect(result.emits).toBeDefined();
       expect(result.emits.length).toBe(3);
 
-      // Verify tasklet files were created
       for (const file of result.emits) {
         expect(fs.existsSync(file)).toBe(true);
 
@@ -69,7 +93,6 @@ describe('registerTodoSplitter', () => {
         expect(content.conflictScore).toBeGreaterThan(0);
       }
 
-      // Cleanup
       fs.unlinkSync(todoPath);
     });
 
@@ -99,19 +122,12 @@ describe('registerTodoSplitter', () => {
       const result = await handler({});
 
       expect(result.ok).toBe(true);
-      // Will be empty if TODO.md doesn't exist
       expect(Array.isArray(result.emits)).toBe(true);
     });
 
     it('should generate sequential tasklet IDs', async () => {
       const todoPath = path.join(process.cwd(), 'TODO-seq.md');
-      const todoContent = `# TODO
-- Task A
-- Task B
-- Task C
-- Task D
-- Task E
-`;
+      const todoContent = `# TODO\n- Task A\n- Task B\n- Task C\n- Task D\n- Task E\n`;
       fs.writeFileSync(todoPath, todoContent, 'utf8');
 
       const handler = handlers.get('todo.decompose')!;
@@ -119,7 +135,6 @@ describe('registerTodoSplitter', () => {
 
       expect(result.emits.length).toBe(5);
 
-      // Check IDs are sequential
       const ids = result.emits.map((file: string) => {
         const content = JSON.parse(fs.readFileSync(file, 'utf8'));
         return content.id;
@@ -132,10 +147,7 @@ describe('registerTodoSplitter', () => {
 
     it('should strip leading dash and whitespace from titles', async () => {
       const todoPath = path.join(process.cwd(), 'TODO-strip.md');
-      const todoContent = `# TODO
--    Task with spaces
-- Task without spaces
-`;
+      const todoContent = `# TODO\n-    Task with spaces\n- Task without spaces\n`;
       fs.writeFileSync(todoPath, todoContent, 'utf8');
 
       const handler = handlers.get('todo.decompose')!;
@@ -163,7 +175,6 @@ describe('registerTodoSplitter', () => {
       expect(result.ok).toBe(true);
       expect(result.branch).toBe('feature/TL-001');
 
-      // Verify log entry was created
       const logPath = path.join(process.cwd(), 'data', 'materialized.log');
       expect(fs.existsSync(logPath)).toBe(true);
 

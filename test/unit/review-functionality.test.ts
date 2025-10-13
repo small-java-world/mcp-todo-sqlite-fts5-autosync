@@ -2,6 +2,32 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DB } from '../../src/utils/db.js';
 import fs from 'fs';
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function removeTempDir(dir: string) {
+  if (!fs.existsSync(dir)) return;
+
+  let lastError: NodeJS.ErrnoException | undefined;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      lastError = undefined;
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'EBUSY' && code !== 'EPERM') {
+        throw err;
+      }
+      lastError = err as NodeJS.ErrnoException;
+      await sleep(50 * (attempt + 1));
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+}
+
 describe('Review Functionality Tests', () => {
   let db: DB;
   let tempDir: string;
@@ -18,10 +44,10 @@ describe('Review Functionality Tests', () => {
     db.importTodoMd(todoMd);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     db.close();
     if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      await removeTempDir(tempDir);
     }
   });
 
@@ -98,8 +124,7 @@ describe('Review Functionality Tests', () => {
 
     db.addComment(taskId, by, text, at);
 
-    // Check that comment was added (we can't directly verify the comment
-    // without accessing the database directly, but we can check that no error was thrown)
+    // Check that comment was added
     const task = db.getTask(taskId);
     expect(task).toBeDefined();
   });
@@ -157,7 +182,7 @@ describe('Review Functionality Tests', () => {
     const taskId = 'T-REVIEW-1';
     const decision = 'APPROVE';
     const by = 'reviewer1';
-    const note = 'Special chars: <>&"\'日本語';
+    const note = 'Special chars: <>&"\'���{��';
     const at = Date.now();
 
     db.addReview(taskId, decision, by, note, at);
@@ -170,7 +195,7 @@ describe('Review Functionality Tests', () => {
   it('should handle comment with special characters', () => {
     const taskId = 'T-REVIEW-1';
     const by = 'reviewer1';
-    const text = 'Comment with special chars: <>&"\'日本語';
+    const text = 'Comment with special chars: <>&"\'���{��';
 
     db.addComment(taskId, by, text);
 

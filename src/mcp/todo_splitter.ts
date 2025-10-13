@@ -1,19 +1,37 @@
 /**
- * TODO.md を小粒タスクへ分割（衝突しにくい形へ）。まずは最小のダミー。
- * - todo.decompose({from, policy?})  → tasklets/*.json を生成
- * - todo.materialize({tasklet_id})   → branch/worktree 準備（実装は既存APIと結合予定）
+ * TODO.md をタスクに分解するためのユーティティです。
+ * - todo.decompose({from, policy?})  -> tasklets/*.json を生成
+ * - todo.materialize({tasklet_id})   -> branch/worktree を生成（実際の動作は擬似API）
  */
 import { promises as fs } from "fs";
 import * as path from "path";
 
 type JsonRpcCtx = { log?: (...a: any[]) => void };
 
-export function registerTodoSplitter(register: (method: string, handler: (params: any, ctx?: JsonRpcCtx) => Promise<any>) => void) {
+function resolveTaskletsDir(): string {
+  const configured = process.env.TASKLETS_DIR;
+  const base = configured && configured.trim().length > 0 ? configured.trim() : "tasklets";
+  const resolved = path.isAbsolute(base) ? base : path.join(process.cwd(), base);
+  
+  // ディレクトリが存在しない場合は作成
+  try {
+    const fsSync = require('fs');
+    fsSync.mkdirSync(resolved, { recursive: true });
+  } catch (error) {
+    console.warn(`Failed to create tasklets directory: ${resolved}`, error);
+  }
+  
+  return resolved;
+}
+
+export function registerTodoSplitter(
+  register: (method: string, handler: (params: any, ctx?: JsonRpcCtx) => Promise<any>) => void
+) {
   register("todo.decompose", async (params) => {
     const from = String(params?.from ?? "TODO.md");
     const body = await readSafe(from);
-    const lines = body.split(/\r?\n/).filter(l => l.trim().startsWith("- "));
-    const outDir = path.join(process.cwd(), "tasklets");
+    const lines = body.split(/\r?\n/).filter((l) => l.trim().startsWith("- "));
+    const outDir = resolveTaskletsDir();
     await fs.mkdir(outDir, { recursive: true });
     const emits: string[] = [];
     let i = 0;
@@ -39,6 +57,9 @@ export function registerTodoSplitter(register: (method: string, handler: (params
 }
 
 async function readSafe(fp: string) {
-  try { return await fs.readFile(fp, "utf8"); }
-  catch { return ""; }
+  try {
+    return await fs.readFile(fp, "utf8");
+  } catch {
+    return "";
+  }
 }

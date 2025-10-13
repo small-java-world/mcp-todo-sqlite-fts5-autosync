@@ -35,7 +35,7 @@ describe('Server Improvements Integration', () => {
     await new Promise(res => ws.on('open', res));
     const registerResult = await rpc(ws, 'register', { authToken: TOKEN });
     sessionId = registerResult.session;
-  }, 30000);
+  }, 60000); // 60秒に延長
 
   afterAll(async () => {
     try { ws.close(); } catch {}

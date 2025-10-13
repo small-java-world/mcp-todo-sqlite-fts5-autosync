@@ -99,3 +99,6 @@ jspm_packages/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Test temporary directories
+temp_test_*/

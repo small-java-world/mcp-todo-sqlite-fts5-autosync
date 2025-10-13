@@ -13,6 +13,21 @@ pnpm build
 # 環境変数（任意）：MCP_TOKEN=xxxx で簡易認証
 MCP_TOKEN=devtoken pnpm start
 ```
+
+### テスト実行とクリーンアップ
+```bash
+# 通常のテスト実行
+pnpm test
+
+# テスト実行後に一時ディレクトリを自動クリーンアップ
+pnpm run test:clean
+
+# 単体テストのみ実行してクリーンアップ
+pnpm run test:unit:clean
+
+# 手動でクリーンアップ
+pnpm run cleanup
+```
 - Windows ファイアウォール / macOS 受信許可 / Linux ufw で **8765/tcp** を許可
 - 同一Wi‑Fi内の他端末から `ws://<controller-ip>:8765` へ接続
 

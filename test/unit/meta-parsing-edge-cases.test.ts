@@ -11,10 +11,18 @@ describe('Meta Parsing Edge Cases Tests', () => {
     db = new DB(tempDir, 'test.db');
   });
 
-  afterEach(() => {
-    db.close();
+  afterEach(async () => {
+    if (db) {
+      db.close();
+    }
+    // Wait a bit for file handles to be released
+    await new Promise(resolve => setTimeout(resolve, 100));
     if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch (e) {
+        // Ignore cleanup errors
+      }
     }
   });
 
@@ -147,9 +155,9 @@ describe('Meta Parsing Edge Cases Tests', () => {
 - Created: 2025-01-16T09:00:00Z
 
 ### Related:
-- https://example.com/path?param=value&other=<>&"'
-- Description with special chars: <>&"'日本語
-- Simple link
+- [T-RELATED-1] URL with special chars: https://example.com/path?param=value&other=<>&"'
+- [T-RELATED-2] Description with special chars: <>&"'日本語
+- [T-RELATED-3] Simple link
 `;
 
     const result = db.importTodoMd(todoMd);

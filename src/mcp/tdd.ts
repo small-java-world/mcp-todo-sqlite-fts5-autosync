@@ -65,6 +65,15 @@ async function runCmd(cmd: string, args: string[], ctx?: JsonRpcCtx) {
   return new Promise<void>((resolve, reject) => {
     const p = spawn(cmd, args, { stdio: "inherit", shell: true });
     ctx?.log?.("[run]", cmd, args.join(" "));
-    p.on("exit", (code) => (code === 0 || code === 1) ? resolve() : reject(new Error(`${cmd} exit ${code}`)));
+    p.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${cmd} exit ${code}`));
+      }
+    });
+    p.on("error", (err) => {
+      reject(err);
+    });
   });
 }

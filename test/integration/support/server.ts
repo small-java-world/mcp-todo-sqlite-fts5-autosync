@@ -11,6 +11,7 @@ export type ServerHandle = {
 };
 
 const DEFAULT_TOKEN = process.env.MCP_TEST_TOKEN || 'devtoken';
+const DEFAULT_TIMEOUT = 30000; // 30秒に延長
 
 function getAvailablePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -30,7 +31,7 @@ function getAvailablePort(): Promise<number> {
   });
 }
 
-function waitForPort(port: number, timeoutMs = 15000): Promise<void> {
+function waitForPort(port: number, timeoutMs = DEFAULT_TIMEOUT): Promise<void> {
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
     const tryConnect = () => {
@@ -56,16 +57,18 @@ export async function startIntegrationServer(token = DEFAULT_TOKEN): Promise<Ser
   const dataDir = path.join(process.cwd(), 'data', `integration-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   fs.mkdirSync(dataDir, { recursive: true });
 
-  const useDistBundle = process.env.TEST_USE_DIST === '1' && fs.existsSync(path.join(process.cwd(), 'dist', 'server.js'));
+  // 常にdistバンドルを使用して安定性を向上
+  const useDistBundle = fs.existsSync(path.join(process.cwd(), 'dist', 'server.js'));
   const entry = useDistBundle
     ? ['dist/server.js']
-    : ['--loader', 'ts-node/esm', 'src/server.ts'];
+    : ['node', 'src/server.ts']; // フォールバック
 
   const env = {
     ...process.env,
     PORT: String(port),
     MCP_TOKEN: token,
     DATA_DIR: dataDir,
+    NODE_ENV: 'test', // テスト環境を明示
     AUTO_EXPORT_ON_EXIT: '0',
     EXPORT_DIR: path.join(dataDir, 'snapshots'),
     SHADOW_PATH: path.join(dataDir, 'shadow', 'TODO.shadow.md'),

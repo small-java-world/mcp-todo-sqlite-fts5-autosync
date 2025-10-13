@@ -11,10 +11,18 @@ describe('Change Feed Tests', () => {
     db = new DB(tempDir, 'test.db');
   });
 
-  afterEach(() => {
-    db.close();
+  afterEach(async () => {
+    if (db) {
+      db.close();
+    }
+    // Wait a bit for file handles to be released
+    await new Promise(resolve => setTimeout(resolve, 100));
     if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch (e) {
+        // Ignore cleanup errors
+      }
     }
   });
 

@@ -10,7 +10,11 @@
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "cleanup": "node scripts/cleanup-test-dirs.js",
+    "test:clean": "npm run test && npm run cleanup",
+    "test:unit:clean": "npm run test:unit && npm run cleanup",
+    "test:integration:clean": "npm run test:integration && npm run cleanup"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
