@@ -2,6 +2,7 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { ReviewIssuesManager } from './review-issues.js';
 
 export type TaskRow = {
   id: string;
@@ -22,6 +23,7 @@ export type TaskRow = {
 export class DB {
   db: Database.Database;
   casRoot: string;
+  issuesManager: ReviewIssuesManager;
 
   constructor(dataDir = 'data', dbFile = 'todo.db', casRoot = path.join('data','cas')) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -31,6 +33,7 @@ export class DB {
     this.db = new Database(full);
     this.pragma();
     this.initSchema();
+    this.issuesManager = new ReviewIssuesManager(this.db);
   }
 
   pragma() {
@@ -352,7 +355,7 @@ return p;
 
   getBlobPath(sha256: string) {
     return path.join(this.casRoot, sha256);
-  }
+}
 
 archiveTask(id: string, reason?: string) {
   const row = this.getTask(id);
@@ -361,24 +364,24 @@ archiveTask(id: string, reason?: string) {
   const now = Date.now();
   
   try {
-    const tx = this.db.transaction(() => {
+  const tx = this.db.transaction(() => {
       this.db.prepare(`INSERT OR REPLACE INTO archived_tasks (id,title,text,done,meta,vclock,due_at,archived_at,reason) VALUES (?,?,?,?,?,?,?,?,?)`)
         .run(row.id, row.title, row.text, row.done, row.meta, row.vclock, row.due_at ?? null, now, reason ?? null);
-      // delete from FTS
-      const rid = (this.db.prepare(`SELECT rowid FROM tasks WHERE id=?`).get(id) as any)?.rowid;
-      if (rid != null) {
-        this.db.prepare(`INSERT INTO tasks_fts(tasks_fts,rowid,id,title,text) VALUES('delete', ?, ?, ?, ?)`)
-          .run(rid, row.id, row.title, row.text);
-      }
-      this.db.prepare(`UPDATE tasks SET archived=1, updated_at=? WHERE id=?`).run(now, id);
-    });
-    tx();
-    return { ok: true, archived_at: now };
+    // delete from FTS
+    const rid = (this.db.prepare(`SELECT rowid FROM tasks WHERE id=?`).get(id) as any)?.rowid;
+    if (rid != null) {
+      this.db.prepare(`INSERT INTO tasks_fts(tasks_fts,rowid,id,title,text) VALUES('delete', ?, ?, ?, ?)`)
+        .run(rid, row.id, row.title, row.text);
+    }
+    this.db.prepare(`UPDATE tasks SET archived=1, updated_at=? WHERE id=?`).run(now, id);
+  });
+  tx();
+  return { ok: true, archived_at: now };
   } catch (error: any) {
     // データベース破損の場合は、シンプルなアーカイブ処理を行う
     console.warn('Archive task failed, using simple approach:', error.message);
     this.db.prepare(`UPDATE tasks SET archived=1, updated_at=? WHERE id=?`).run(now, id);
-    return { ok: true, archived_at: now };
+  return { ok: true, archived_at: now };
   }
 }
 
@@ -387,30 +390,30 @@ restoreTask(id: string) {
   if (!snap) { 
     // archived_tasksにデータがない場合は、単純にarchivedフラグを解除
     console.warn('Restore task: no archived data found, using simple approach');
-    const now = Date.now();
+  const now = Date.now();
     this.db.prepare(`UPDATE tasks SET archived=0, updated_at=? WHERE id=?`).run(now, id);
     return { ok: true };
   }
   
   const now = Date.now();
   try {
-    const tx = this.db.transaction(() => {
+  const tx = this.db.transaction(() => {
       this.db.prepare(`UPDATE tasks SET archived=0, updated_at=?, title=?, text=?, done=?, meta=?, vclock=?, due_at=? WHERE id=?`)
         .run(now, snap.title, snap.text, snap.done, snap.meta, snap.vclock, snap.due_at ?? null, id);
-      const rid = (this.db.prepare(`SELECT rowid FROM tasks WHERE id=?`).get(id) as any)?.rowid;
-      if (rid != null) {
-        this.db.prepare(`INSERT INTO tasks_fts(rowid,id,title,text) VALUES (?,?,?,?)`)
-          .run(rid, snap.id, snap.title, snap.text);
-      }
-      this.db.prepare(`DELETE FROM archived_tasks WHERE id=?`).run(id);
-    });
-    tx();
-    return { ok: true };
+    const rid = (this.db.prepare(`SELECT rowid FROM tasks WHERE id=?`).get(id) as any)?.rowid;
+    if (rid != null) {
+      this.db.prepare(`INSERT INTO tasks_fts(rowid,id,title,text) VALUES (?,?,?,?)`)
+        .run(rid, snap.id, snap.title, snap.text);
+    }
+    this.db.prepare(`DELETE FROM archived_tasks WHERE id=?`).run(id);
+  });
+  tx();
+  return { ok: true };
   } catch (error: any) {
     // データベース破損の場合は、シンプルな復元処理を行う
     console.warn('Restore task failed, using simple approach:', error.message);
     this.db.prepare(`UPDATE tasks SET archived=0, updated_at=? WHERE id=?`).run(now, id);
-    return { ok: true };
+  return { ok: true };
   }
 }
 
@@ -466,98 +469,398 @@ listArchived(limit=20, offset=0) {
   return { ok: true };
 }
 
-// --- TODO.md import/export (minimal) ---
-importTodoMd(md: string) {
-  const lines = md.split(/\r?\n/);
-  let currentSection: string|null = null;
-  const sectionStack: string[] = [];
-  let lastTaskId: string|null = null;
-
-  const parseAttrs = (s: string) => {
-    const out:any = {};
+  // Helper functions for importTodoMd
+  private parseAttrs(s: string) {
+    const out: any = {};
     s.split(',').forEach(kv => {
       const m = kv.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$/);
       if (m) out[m[1]] = m[2].replace(/^\{|\}$/g,'').trim();
     });
     return out;
-  };
+  }
 
-  const isoToEpoch = (s: string) => {
+  private isoToEpoch(s: string) {
     const t = Date.parse(s);
     return isNaN(t) ? Date.now() : t;
-  };
+  }
 
-  const reL2 = /^## \[(.+?)\]\s+(.*?)(?:\s*\{([^}]*)\})?\s*$/;
-  const reL3 = /^### \[(.+?)\]\s+(.*?)(?:\s*\{([^}]*)\})?\s*$/;
-  const reMeta = /^Meta:\s*$/i;
-  const reTimeline = /^Timeline:\s*$/i;
-  const reRelated = /^Related:\s*$/i;
-  const reRelatedWithContent = /^Related:\s+.+$/i;
-  const reNotes = /^Notes:\s*$/i;
-  const reReviewHdr = /^####\s+Reviews\s*$/i;
-  const reIssues = /^(?:###\s+)?Issues:?\s*$/i;
-  const reIssueHeading = /^####\s+Issue\s+(\d+):\s*(.+)$/i;
-  const reReview = /^-\s+review@([^\s]+)\s+by\s+(\S+)\s*=>\s*(\S+)(?:\s+(.+))?$/i;
-  const reComment = /^-\s+comment@([^\s]+)\s+by\s+(\S+):\s*"(.+)"\s*$/i;
+  // Regular expressions for importTodoMd
+  private static readonly RE_L2 = /^## \[(.+?)\]\s+(.*?)(?:\s*\{([^}]*)\})?\s*$/;
+  private static readonly RE_L3 = /^### \[(.+?)\]\s+(.*?)(?:\s*\{([^}]*)\})?\s*$/;
+  private static readonly RE_META = /^Meta:\s*$/i;
+  private static readonly RE_TIMELINE = /^Timeline:\s*$/i;
+  private static readonly RE_RELATED = /^Related:\s*$/i;
+  private static readonly RE_RELATED_WITH_CONTENT = /^Related:\s+.+$/i;
+  private static readonly RE_NOTES = /^Notes:\s*$/i;
+  private static readonly RE_REVIEW_HDR = /^####\s+Reviews\s*$/i;
+  private static readonly RE_ISSUES = /^(?:###\s+)?Issues:?\s*$/i;
+  private static readonly RE_ISSUE_HEADING = /^####\s+Issue\s+(\d+):\s*(.+)$/i;
+  private static readonly RE_REVIEW = /^-\s+review@([^\s]+)\s+by\s+(\S+)\s*=>\s*(\S+)(?:\s+(.+))?$/i;
+  private static readonly RE_COMMENT = /^-\s+comment@([^\s]+)\s+by\s+(\S+):\s*"(.+)"\s*$/i;
+  private static readonly RE_TIMELINE_EVENT = /^- (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) by (\S+): (.+)$/;
 
-  // Issues parsing
-  const reIssueField = /^  - ([^:]+):\s*(.+)$/;
-  const reIssueFieldBold = /^-\s+\*\*([^*]+)\*\*:\s*(.+)$/;
-  const reIssueResponsesHeader = /^\*\*Responses:\*\*$/i;
-  const reIssueResponseLegacy = /^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+(\S+)\s+\((\w+)\):\s*"([^"]+)"(\s*\(internal\))?$/;
-  const reIssueResponseNew = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+([^:(]+?)(?:\s+\(([^)]+)\))?:\s*(.+)$/;
+  // Parse task from line
+  private parseTaskLine(line: string, lastTaskId: string | null) {
+    const m2 = line.match(DB.RE_L2);
+    if (m2) {
+      const [_, id, title, attrsRaw] = m2;
+      const attrs = attrsRaw ? this.parseAttrs(attrsRaw) : {};
+      const state = (attrs.state || 'DRAFT').replace(/[{},]/g,'').trim();
+      const assignee = attrs.assignee ? attrs.assignee.trim() : null;
+      const due = attrs.due ? this.isoToEpoch(attrs.due) : null;
+      this.upsertTask(id, title, '', null, undefined, { parent_id: null, level: 2, state, assignee, due_at: due });
+      return { taskId: id, isTask: true };
+    }
 
-  // Timeline parsing
-  const reTimelineEvent = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/;
-  const reTimelineState = /^STATE\s+(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
-  const reTimelineReview = /^REVIEW\s+(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
-  const reTimelineComment = /^COMMENT\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
-  const reTimelineArchive = /^ARCHIVE\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
-  const reTimelineRestore = /^RESTORE\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/;
+    const m3 = line.match(DB.RE_L3);
+    if (m3) {
+      const [_, id, title, attrsRaw] = m3;
+      const attrs = attrsRaw ? this.parseAttrs(attrsRaw) : {};
+      const state = (attrs.state || 'DRAFT').replace(/[{},]/g,'').trim();
+      const assignee = attrs.assignee ? attrs.assignee.trim() : null;
+      const due = attrs.due ? this.isoToEpoch(attrs.due) : null;
+      this.upsertTask(id, title, '', lastTaskId, undefined, { parent_id: lastTaskId, level: 3, state, assignee, due_at: due });
+      return { taskId: id, isTask: true };
+    }
 
-  // Related parsing
-  const reRelatedItem = /^-\s+\[([^\]]+)\](?:\s+\(([^)]+)\))?$/;
-  const reRelatedSingle = /^Related:\s*\[([^\]]+)\](?:\s+\[([^\]]+)\])*(?:\s+\[([^\]]+)\])*$/;
+    return { taskId: lastTaskId, isTask: false };
+  }
 
-  // Notes parsing
-  const reNoteItem = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/;
-  const reNoteInternal = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/;
+  // Handle state updates
+  private handleStateUpdate(line: string, lastTaskId: string | null) {
+    const stateMatch = line.match(/^- State:\s*(.+)$/);
+    if (stateMatch && lastTaskId) {
+      const newState = stateMatch[1].trim();
+      try {
+        const task = this.getTask(lastTaskId);
+        if (task) {
+          this.setState(lastTaskId, newState, 'system', 'State updated from TODO.md', Date.now());
+        }
+      } catch (e) {
+        console.warn('Failed to update state:', e);
+      }
+      return true;
+    }
+    return false;
+  }
 
-  const issueFieldNames = new Set([
-    'status',
-    'priority',
-    'category',
-    'severity',
-    'created',
-    'created_by',
-    'resolved',
-    'resolved_by',
-    'closed',
-    'closed_by',
-    'due',
-    'description',
-    'tags'
-  ]);
+  // Handle timeline parsing
+  private handleTimelineParsing(line: string, lastTaskId: string | null, inTimeline: boolean, timelineEvents: any[]) {
+    // Check for Timeline section header
+    if (line.trim() === '### Timeline:') {
+      return { inTimeline: true, timelineEvents };
+    }
 
-  const createIssue = (title: string) => ({
-    title: title.trim(),
-    priority: 'medium',
-    status: 'open',
-    category: undefined,
-    severity: 'medium',
-    description: undefined,
-    created_at: undefined,
-    created_by: undefined,
-    resolved_at: undefined,
-    resolved_by: undefined,
-    closed_at: undefined,
-    closed_by: undefined,
-    due_date: undefined,
-    tags: undefined,
-    responses: [] as any[]
-  });
+    if (inTimeline && lastTaskId) {
+      // Parse timeline events in the format: "- 2025-01-16T09:00:00Z by system: Task created"
+      const timelineMatch = line.match(DB.RE_TIMELINE_EVENT);
+      if (timelineMatch) {
+        const [, timestamp, actor, action] = timelineMatch;
+        timelineEvents.push({
+          timestamp,
+          actor,
+          action
+        });
+        return { inTimeline: true, timelineEvents };
+      }
+    }
 
-  const applyIssueField = (issue: any, fieldLabel: string, rawValue: string) => {
+    return { inTimeline, timelineEvents };
+  }
+
+  // Save timeline events to task meta
+  private saveTimelineEvents(taskId: string, timelineEvents: any[]) {
+    if (!taskId || timelineEvents.length === 0) return;
+
+    const task = this.getTask(taskId);
+    if (!task) return;
+
+    // Get existing meta or create new one
+    let meta = {};
+    if (task.meta) {
+      try {
+        meta = JSON.parse(task.meta);
+      } catch (e) {
+        meta = {};
+      }
+    }
+
+    // Add timeline to meta
+    (meta as any).timeline = timelineEvents;
+
+    // Update task with new meta
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET meta = ? WHERE id = ?
+    `);
+    stmt.run(JSON.stringify(meta), taskId);
+  }
+
+  // Handle related parsing
+  private handleRelatedParsing(line: string, lastTaskId: string | null, inRelated: boolean, relatedLinks: any[]) {
+    // Check for Related section header
+    if (line.trim() === '### Related:') {
+      return { inRelated: true, relatedLinks };
+    }
+
+    if (inRelated && lastTaskId) {
+      // Parse related links in various formats
+      // Format 3: - [T-RELATED-3] External Link: https://example.com/issue/123 (check URL first)
+      const urlMatch = line.match(/^- \[([^\]]+)\]\s+([^:]+):\s*(https?:\/\/[^\s]+)$/);
+      if (urlMatch) {
+        const [, taskId, title, url] = urlMatch;
+        relatedLinks.push({
+          taskId,
+          title,
+          url
+        });
+        return { inRelated: true, relatedLinks };
+      }
+
+      // Format 2: - [T-RELATED-2] Task with Description: This is a description
+      const descMatch = line.match(/^- \[([^\]]+)\]\s+([^:]+):\s*(.+)$/);
+      if (descMatch) {
+        const [, taskId, title, description] = descMatch;
+        relatedLinks.push({
+          taskId,
+          title,
+          description
+        });
+        return { inRelated: true, relatedLinks };
+      }
+
+      // Format 1: - [T-RELATED-1] Simple Task (check simple format last)
+      const simpleMatch = line.match(/^- \[([^\]]+)\]\s+(.+)$/);
+      if (simpleMatch) {
+        const [, taskId, title] = simpleMatch;
+        relatedLinks.push({
+          taskId,
+          title
+        });
+        return { inRelated: true, relatedLinks };
+      }
+    }
+
+    return { inRelated, relatedLinks };
+  }
+
+  // Save related links to task meta
+  private saveRelatedLinks(taskId: string, relatedLinks: any[]) {
+    if (!taskId || relatedLinks.length === 0) return;
+
+    const task = this.getTask(taskId);
+    if (!task) return;
+
+    // Get existing meta or create new one
+    let meta = {};
+    if (task.meta) {
+      try {
+        meta = JSON.parse(task.meta);
+      } catch (e) {
+        meta = {};
+      }
+    }
+
+    // Add related to meta
+    (meta as any).related = relatedLinks;
+
+    // Update task with new meta
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET meta = ? WHERE id = ?
+    `);
+    stmt.run(JSON.stringify(meta), taskId);
+  }
+
+  // Handle notes parsing
+  private handleNotesParsing(line: string, lastTaskId: string | null, inNotes: boolean, notesContent: string[]) {
+    // Check for Notes section header
+    if (line.trim() === '### Notes:') {
+      return { inNotes: true, notesContent };
+    }
+
+    // Check if we're starting a new section (end of notes)
+    if (inNotes && line.trim().startsWith('### ')) {
+      return { inNotes: false, notesContent };
+    }
+
+    if (inNotes && lastTaskId) {
+      // Add line to notes content (preserve original formatting)
+      notesContent.push(line);
+      return { inNotes: true, notesContent };
+    }
+
+    return { inNotes, notesContent };
+  }
+
+  // Save notes to task meta
+  private saveNotes(taskId: string, notesContent: string[]) {
+    if (!taskId) return;
+
+    const task = this.getTask(taskId);
+    if (!task) return;
+
+    // Get existing meta or create new one
+    let meta = {};
+    if (task.meta) {
+      try {
+        meta = JSON.parse(task.meta);
+      } catch (e) {
+        meta = {};
+      }
+    }
+
+    // Add notes to meta (join lines with newlines, trim trailing newlines)
+    const notesText = notesContent.join('\n').replace(/\n+$/, '');
+    (meta as any).notes = notesText;
+
+    // Update task with new meta
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET meta = ? WHERE id = ?
+    `);
+    stmt.run(JSON.stringify(meta), taskId);
+  }
+
+  // Handle meta parsing
+  private handleMetaParsing(line: string, lastTaskId: string | null, inMeta: boolean, metaContent: string[]) {
+    // Check for Meta section header
+    if (line.trim() === 'Meta:') {
+      return { inMeta: true, metaContent };
+    }
+
+    // Check if we're starting a new section (end of meta)
+    if (inMeta && line.trim().startsWith('### ')) {
+      return { inMeta: false, metaContent };
+    }
+
+    if (inMeta && lastTaskId) {
+      // Add line to meta content (preserve original formatting)
+      metaContent.push(line);
+      return { inMeta: true, metaContent };
+    }
+
+    return { inMeta, metaContent };
+  }
+
+  // Save meta to task meta
+  private saveMeta(taskId: string, metaContent: string[]) {
+    if (!taskId || metaContent.length === 0) return;
+
+    const task = this.getTask(taskId);
+    if (!task) return;
+
+    // Get existing meta or create new one
+    let meta = {};
+    if (task.meta) {
+      try {
+        meta = JSON.parse(task.meta);
+      } catch (e) {
+        meta = {};
+      }
+    }
+
+    // Parse JSON from meta content
+    const metaText = metaContent.join('\n');
+    try {
+      // Extract JSON from code blocks
+      const jsonMatch = metaText.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        const jsonText = jsonMatch[1];
+        const parsedMeta = JSON.parse(jsonText);
+        // Merge parsed meta with existing meta
+        Object.assign(meta, parsedMeta);
+      }
+    } catch (e) {
+      // If JSON parsing fails, ignore
+    }
+
+    // Update task with new meta
+    const stmt = this.db.prepare(`
+      UPDATE tasks SET meta = ? WHERE id = ?
+    `);
+    stmt.run(JSON.stringify(meta), taskId);
+  }
+
+  // Handle issues parsing
+  private handleIssuesParsing(line: string, lastTaskId: string | null, inIssues: boolean, currentIssue: any, inResponses: boolean = false) {
+    if (DB.RE_ISSUES.test(line.trim())) {
+      return { inIssues: true, currentIssue: null, inResponses: false };
+    }
+
+      if (inIssues && lastTaskId) {
+        const headingMatch = line.match(DB.RE_ISSUE_HEADING);
+      if (headingMatch) {
+        if (currentIssue) {
+          this.saveIssue(currentIssue, lastTaskId);
+        }
+        const [, , issueTitle] = headingMatch;
+        return { inIssues: true, currentIssue: this.createIssue(issueTitle), inResponses: false };
+      }
+
+      // Handle Responses section
+      if (line.trim() === '- Responses:' || line.trim() === '**Responses:**') {
+        return { inIssues: true, currentIssue, inResponses: true };
+      }
+
+        if (currentIssue) {
+          // Handle responses in the format: "- 2025-01-16T10:00:00Z by developer1: I'll optimize the queries"
+          // Check for internal flag at the end of the line
+          const isInternal = line.trim().endsWith('(internal)');
+          const cleanLine = isInternal ? line.replace(/\s*\(internal\)\s*$/, '') : line;
+          const responseMatch = cleanLine.match(/^\s*-\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) by (\S+) \(([^)]+)\): "(.+)"$/);
+          if (responseMatch && inResponses) {
+            const [, timestamp, author, responseType, response] = responseMatch;
+            const createdAt = this.isoToEpoch(timestamp);
+            
+            // Add response to current issue
+            if (!currentIssue.responses) {
+              currentIssue.responses = [];
+            }
+            currentIssue.responses.push({
+              response_type: responseType,
+              content: response,
+              created_at: createdAt,
+              created_by: author,
+              is_internal: isInternal ? 1 : 0
+            });
+            return { inIssues: true, currentIssue, inResponses: true };
+          }
+
+          // Handle both formats: "- Priority: High" and "- **Priority**: High"
+          const fieldMatch = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.+)$/) || line.match(/^\s*-\s*([^:]+):\s*(.+)$/);
+          if (fieldMatch && !inResponses) {
+            const [, fieldLabel, rawValue] = fieldMatch;
+            this.applyIssueField(currentIssue, fieldLabel, rawValue);
+            return { inIssues: true, currentIssue, inResponses: false };
+          }
+        
+      }
+    }
+
+    return { inIssues, currentIssue, inResponses };
+  }
+
+  // Create issue helper
+  private createIssue(title: string) {
+    return {
+      title: title.trim(),
+      priority: 'medium',
+      status: 'open',
+      category: undefined,
+      severity: 'medium',
+      description: undefined,
+      created_at: undefined,
+      created_by: undefined,
+      resolved_at: undefined,
+      resolved_by: undefined,
+      closed_at: undefined,
+      closed_by: undefined,
+      due_date: undefined,
+      tags: undefined,
+      responses: [] as any[]
+    };
+  }
+
+  // Apply issue field helper
+  private applyIssueField(issue: any, fieldLabel: string, rawValue: string) {
     const key = fieldLabel.trim().toLowerCase().replace(/\s+/g, '_');
     const value = rawValue.trim();
     if (!value) return;
@@ -565,9 +868,9 @@ importTodoMd(md: string) {
     const parseTimeWithActor = (input: string) => {
       const match = input.match(/^(.+?)\s+by\s+(.+)$/i);
       if (match) {
-        return { ts: isoToEpoch(match[1]), actor: match[2].trim() };
+        return { ts: this.isoToEpoch(match[1]), actor: match[2].trim() };
       }
-      return { ts: isoToEpoch(input), actor: undefined };
+      return { ts: this.isoToEpoch(input), actor: undefined };
     };
 
     switch (key) {
@@ -622,404 +925,20 @@ importTodoMd(md: string) {
         issue.closed_by = value;
         break;
       case 'due':
-        issue.due_date = isoToEpoch(value);
+        issue.due_date = this.isoToEpoch(value);
         break;
       default:
         if (key.endsWith('_by')) {
           issue[key] = value;
         } else if (key.endsWith('_at')) {
-          issue[key] = isoToEpoch(value);
+          issue[key] = this.isoToEpoch(value);
         }
         break;
     }
-  };
-
-  let inMeta = false, inIssues = false;
-  let inTimeline = false;
-  let inRelated = false;
-  let inNotes = false;
-  let metaAccum: any = {};
-  let inReviews = false;
-  let currentIssue: any = null;
-  let inIssueResponses = false;
-  let metaJson = '';
-  let inMetaJson = false;
-
-  for (let i=0;i<lines.length;i++) {
-    const line = lines[i];
-
-    if (line.startsWith('# ') && !line.startsWith('##')) {
-      currentSection = line.replace(/^#\s+/, '').trim();
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    const m2 = line.match(reL2);
-    if (m2) {
-      const [_, id, title, attrsRaw] = m2;
-      const attrs = attrsRaw ? parseAttrs(attrsRaw) : {};
-      const state = (attrs.state || 'DRAFT').replace(/[{},]/g,'').trim();
-      const assignee = attrs.assignee ? attrs.assignee.trim() : null;
-      const due = attrs.due ? isoToEpoch(attrs.due) : null;
-      this.upsertTask(id, title, '', null, undefined, { parent_id: null, level: 2, state, assignee, due_at: due });
-      lastTaskId = id;
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false; metaAccum = {};
-      continue;
-    }
-    const m3 = line.match(reL3);
-    if (m3) {
-      const [_, id, title, attrsRaw] = m3;
-      const attrs = attrsRaw ? parseAttrs(attrsRaw) : {};
-      const state = (attrs.state || 'DRAFT').replace(/[{},]/g,'').trim();
-      const assignee = attrs.assignee ? attrs.assignee.trim() : null;
-      const due = attrs.due ? isoToEpoch(attrs.due) : null;
-      // parent is last L2
-      const parent = lastTaskId;
-      this.upsertTask(id, title, '', null, undefined, { parent_id: parent ?? null, level: 3, state, assignee, due_at: due });
-      inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    if (reMeta.test(line)) {
-      inMeta = true; inTimeline = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    if (reTimeline.test(line)) {
-      inTimeline = true; inMeta = false; inRelated = false; inNotes = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    if (reRelated.test(line)) {
-      inRelated = true; inMeta = false; inTimeline = false; inNotes = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    if (reRelatedWithContent.test(line)) {
-      // Handle single line Related format
-      const relatedText = line.replace(/^Related:\s*/i, '').trim();
-      const idMatches = relatedText.match(/\[([^\]]+)\]/g);
-      if (idMatches && lastTaskId) {
-        const now = Date.now();
-        for (const idMatch of idMatches) {
-          const targetId = idMatch.slice(1, -1); // Remove [ and ]
-          try {
-            this.db.prepare(`
-              INSERT INTO task_links (task_id, target_id, relation, created_at, note)
-              VALUES (?, ?, ?, ?, ?)
-            `).run(lastTaskId, targetId, 'related to', now, null);
-          } catch (e) {
-            // Ignore duplicate links
-          }
-        }
-      }
-      continue;
-    }
-    if (reNotes.test(line)) {
-      inNotes = true; inMeta = false; inTimeline = false; inRelated = false; inReviews=false; inIssues = false;
-      continue;
-    }
-    if (reIssues.test(line.trim())) {
-      inIssues = true; inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews = false;
-      inIssueResponses = false;
-      continue;
-    }
-    
-    // Handle state updates
-    const stateMatch = line.match(/^- State:\s*(.+)$/);
-    if (stateMatch && lastTaskId) {
-      const newState = stateMatch[1].trim();
-      try {
-        const task = this.getTask(lastTaskId);
-        if (task) {
-          this.setState(lastTaskId, newState, 'system', 'State updated from TODO.md', Date.now());
-        }
-      } catch (e) {
-        console.warn('Failed to update state:', e);
-      }
-      continue;
-    }
-    if (reReviewHdr.test(line)) {
-      inReviews = true; inMeta=false; inIssues = false;
-      continue;
-    }
-    if (inMeta && line.trim()) {
-      // Meta JSON parsing
-      if (line.trim().startsWith('```json')) {
-        inMetaJson = true;
-        metaJson = '';
-        continue;
-      }
-      if (line.trim().startsWith('```') && inMetaJson) {
-        inMetaJson = false;
-        try {
-          const meta = JSON.parse(metaJson);
-          if (lastTaskId) {
-            this.db.prepare('UPDATE tasks SET meta = ? WHERE id = ?').run(JSON.stringify(meta), lastTaskId);
-          }
-        } catch (e) {
-          console.warn('Invalid JSON in meta block:', e);
-        }
-        continue;
-      }
-      if (inMetaJson) {
-        metaJson += line + '\n';
-        continue;
-      }
-    }
-
-    if (inTimeline && line.trim()) {
-      // More flexible timeline parsing
-      const timelineMatch = line.match(/^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/);
-      if (timelineMatch && lastTaskId) {
-        const [_, timestamp, eventType, eventData, note] = timelineMatch;
-        const at = isoToEpoch(timestamp);
-        
-        // Parse event data based on event type
-        if (eventType === 'STATE') {
-          const stateMatch = eventData.match(/^(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
-          if (stateMatch) {
-            const [__, toState, by, stateNote] = stateMatch;
-            this.setState(lastTaskId, toState, by, stateNote || note, at);
-            continue;
-          }
-        } else if (eventType === 'REVIEW') {
-          const reviewMatch = eventData.match(/^(\w+)\s+by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
-          if (reviewMatch) {
-            const [__, decision, by, reviewNote] = reviewMatch;
-            this.addReview(lastTaskId, decision, by, reviewNote || note, at);
-            continue;
-          }
-        } else if (eventType === 'COMMENT') {
-          const commentMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
-          if (commentMatch) {
-            const [__, by, commentText] = commentMatch;
-            this.addComment(lastTaskId, by, commentText || note || '', at);
-            continue;
-          }
-        } else if (eventType === 'ARCHIVE') {
-          const archiveMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
-          if (archiveMatch) {
-            const [__, by, archiveNote] = archiveMatch;
-            this.archiveTask(lastTaskId, archiveNote || note);
-            continue;
-          }
-        } else if (eventType === 'RESTORE') {
-          const restoreMatch = eventData.match(/^by\s+(\S+)(?:\s+note\s+"([^"]*)")?$/);
-          if (restoreMatch) {
-            const [__, by, restoreNote] = restoreMatch;
-            this.restoreTask(lastTaskId);
-            continue;
-          }
-        } else {
-          // Unknown event type - ignore silently
-          continue;
-        }
-      }
-    }
-
-    if (inRelated && line.trim()) {
-      const relatedMatch = line.match(reRelatedItem);
-      if (relatedMatch && lastTaskId) {
-        const [__, targetId, relation] = relatedMatch;
-        const now = Date.now();
-        try {
-          this.db.prepare(`
-            INSERT INTO task_links (task_id, target_id, relation, created_at, note)
-            VALUES (?, ?, ?, ?, ?)
-          `).run(lastTaskId, targetId, relation || 'related to', now, null);
-        } catch (e) {
-          // Ignore duplicate links
-        }
-        continue;
-      }
-      
-      // Single line related format - capture all IDs
-      const singleRelatedMatch = line.match(/^Related:\s*(.+)$/);
-      if (singleRelatedMatch && lastTaskId) {
-        const relatedText = singleRelatedMatch[1].trim();
-        // Extract all [ID] patterns
-        const idMatches = relatedText.match(/\[([^\]]+)\]/g);
-        if (idMatches) {
-          const now = Date.now();
-          for (const idMatch of idMatches) {
-            const targetId = idMatch.slice(1, -1); // Remove [ and ]
-            try {
-              this.db.prepare(`
-                INSERT INTO task_links (task_id, target_id, relation, created_at, note)
-                VALUES (?, ?, ?, ?, ?)
-              `).run(lastTaskId, targetId, 'related to', now, null);
-            } catch (e) {
-              // Ignore duplicate links
-            }
-          }
-        }
-        continue;
-      }
-      
-      
-      // Alternative single line format
-      const altSingleRelatedMatch = line.match(/^Related:\s*\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]$/);
-      if (altSingleRelatedMatch && lastTaskId) {
-        const [__, ...targetIds] = altSingleRelatedMatch;
-        const now = Date.now();
-        for (const targetId of targetIds.filter(Boolean)) {
-          try {
-            this.db.prepare(`
-              INSERT INTO task_links (task_id, target_id, relation, created_at, note)
-              VALUES (?, ?, ?, ?, ?)
-            `).run(lastTaskId, targetId, 'related to', now, null);
-          } catch (e) {
-            // Ignore duplicate links
-          }
-        }
-        continue;
-      }
-    }
-
-    if (inNotes && line.trim()) {
-      // Check for internal note first (with optional indentation)
-      const internalNoteMatch = line.match(/^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/);
-      if (internalNoteMatch && lastTaskId) {
-        const [__, timestamp, author, body] = internalNoteMatch;
-        const at = isoToEpoch(timestamp);
-        this.db.prepare(`
-          INSERT INTO task_notes (task_id, at, author, body, is_internal)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(lastTaskId, at, author, body, 1);
-        continue;
-      }
-      
-      // Check for regular note (with optional indentation)
-      const noteMatch = line.match(/^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/);
-      if (noteMatch && lastTaskId) {
-        const [__, timestamp, author, body] = noteMatch;
-        const at = isoToEpoch(timestamp);
-        this.db.prepare(`
-          INSERT INTO task_notes (task_id, at, author, body, is_internal)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(lastTaskId, at, author, body, 0);
-        continue;
-      }
-    }
-
-    if (inIssues) {
-      const trimmed = line.trim();
-      if (!trimmed) {
-        continue;
-      }
-
-      const headingMatch = reIssueHeading.exec(trimmed);
-      if (headingMatch) {
-        if (currentIssue && lastTaskId) {
-          this.saveIssue(currentIssue, lastTaskId);
-        }
-        const [, , issueTitle] = headingMatch;
-        currentIssue = createIssue(issueTitle);
-        inIssueResponses = false;
-        continue;
-      }
-
-      if (reIssueResponsesHeader.test(trimmed)) {
-        inIssueResponses = true;
-        continue;
-      }
-
-      const boldMatch = reIssueFieldBold.exec(trimmed);
-      if (boldMatch) {
-        const [, fieldLabel, rawValue] = boldMatch;
-        const normalized = fieldLabel.trim().toLowerCase().replace(/\s+/g, '_');
-        if (!issueFieldNames.has(normalized)) {
-          if (currentIssue && lastTaskId) {
-            this.saveIssue(currentIssue, lastTaskId);
-          }
-          currentIssue = createIssue(rawValue);
-          if (fieldLabel) {
-            currentIssue.priority = fieldLabel.trim().toLowerCase();
-          }
-        } else {
-          if (!currentIssue) {
-            currentIssue = createIssue('Untitled Issue');
-          }
-          applyIssueField(currentIssue, fieldLabel, rawValue);
-        }
-        inIssueResponses = false;
-        continue;
-      }
-
-      if (currentIssue) {
-        const fieldMatch = reIssueField.exec(line);
-        if (fieldMatch) {
-          const [, fieldLabel, rawValue] = fieldMatch;
-          applyIssueField(currentIssue, fieldLabel, rawValue);
-          inIssueResponses = false;
-          continue;
-        }
-
-        if (inIssueResponses) {
-          const responseMatchNew = reIssueResponseNew.exec(trimmed);
-          if (responseMatchNew) {
-            const [, timestamp, authorRaw, qualifierRaw, contentRaw] = responseMatchNew;
-            const qualifiers = qualifierRaw ? qualifierRaw.split(/[,]/).map(q => q.trim()).filter(Boolean) : [];
-            let responseType = 'comment';
-            let isInternal = false;
-            for (const qualifier of qualifiers) {
-              const lower = qualifier.toLowerCase();
-              if (lower === 'internal') {
-                isInternal = true;
-              } else if (lower && lower !== 'comment') {
-                responseType = lower;
-              }
-            }
-            const content = contentRaw.trim().replace(/^"(.*)"$/, '$1');
-            currentIssue.responses.push({
-              created_at: isoToEpoch(timestamp),
-              created_by: authorRaw.trim(),
-              response_type: responseType,
-              content,
-              is_internal: isInternal
-            });
-            continue;
-          }
-        }
-
-        const legacyResponseMatch = reIssueResponseLegacy.exec(line);
-        if (legacyResponseMatch) {
-          const [, timestamp, author, responseType, content, isInternal] = legacyResponseMatch;
-          currentIssue.responses.push({
-            created_at: isoToEpoch(timestamp),
-            created_by: author,
-            response_type: responseType,
-            content,
-            is_internal: !!isInternal
-          });
-          continue;
-        }
-      }
-    }
-
-    if (inReviews) {
-      const mr = line.match(reReview);
-      if (mr && lastTaskId) {
-        const [__, atIso, by, decision, rest] = mr;
-        const at = isoToEpoch(atIso);
-        this.addReview(lastTaskId, decision, by, rest ? rest.trim() : null, at);
-        continue;
-      }
-      const mc = line.match(reComment);
-      if (mc && lastTaskId) {
-        const [__, atIso, by, text] = mc;
-        const at = isoToEpoch(atIso);
-        this.addComment(lastTaskId, by, text, at);
-        continue;
-      }
-    }
   }
-  
-  // Save the last issue if exists
-  if (currentIssue && lastTaskId) {
-    this.saveIssue(currentIssue, lastTaskId);
-  }
-  
-  return { ok: true };
-}
 
-  saveIssue(issue: any, taskId: string) {
+  // Save issue helper
+  private saveIssue(issue: any, taskId: string) {
     const stmt = this.db.prepare(`
       INSERT INTO review_issues (
         task_id, title, description, status, priority, category, severity,
@@ -1067,6 +986,121 @@ importTodoMd(md: string) {
         );
       }
     }
+  }
+
+  // --- TODO.md import/export (minimal) ---
+  importTodoMd(md: string) {
+    const lines = md.split(/\r?\n/);
+    let currentSection: string|null = null;
+    const sectionStack: string[] = [];
+    let lastTaskId: string|null = null;
+    let inIssues = false;
+    let currentIssue: any = null;
+    let inResponses = false;
+    let inTimeline = false;
+    let timelineEvents: any[] = [];
+    let inRelated = false;
+    let relatedLinks: any[] = [];
+    let inNotes = false;
+    let notesContent: string[] = [];
+    let inMeta = false;
+    let metaContent: string[] = [];
+
+    // Parse each line
+    for (const line of lines) {
+      const trimmed = line.trim();
+      
+      // Don't skip empty lines if we're in notes section (to preserve formatting)
+      if (!trimmed && !inNotes) continue;
+
+      // Handle section headers
+      if (line.startsWith('# ') && !line.startsWith('##')) {
+        currentSection = line.replace(/^#\s+/, '').trim();
+      continue;
+    }
+
+      // Parse tasks
+      const taskResult = this.parseTaskLine(line, lastTaskId);
+      if (taskResult.isTask) {
+        // Save the current issue before moving to the next task
+        if (currentIssue && lastTaskId) {
+          this.saveIssue(currentIssue, lastTaskId);
+          currentIssue = null;
+          inIssues = false;
+          inResponses = false;
+        }
+        
+        lastTaskId = taskResult.taskId;
+        // Reset timeline, related, notes, and meta state when starting a new task
+        inTimeline = false;
+        timelineEvents = [];
+        inRelated = false;
+        relatedLinks = [];
+        inNotes = false;
+        notesContent = [];
+        inMeta = false;
+        metaContent = [];
+        continue;
+      }
+
+      // Handle state updates
+      if (this.handleStateUpdate(line, lastTaskId)) {
+        continue;
+      }
+
+      // Handle timeline parsing
+      const timelineResult = this.handleTimelineParsing(line, lastTaskId, inTimeline, timelineEvents);
+      inTimeline = timelineResult.inTimeline;
+      timelineEvents = timelineResult.timelineEvents;
+
+      // Handle related parsing
+      const relatedResult = this.handleRelatedParsing(line, lastTaskId, inRelated, relatedLinks);
+      inRelated = relatedResult.inRelated;
+      relatedLinks = relatedResult.relatedLinks;
+
+      // Handle notes parsing
+      const notesResult = this.handleNotesParsing(line, lastTaskId, inNotes, notesContent);
+      inNotes = notesResult.inNotes;
+      notesContent = notesResult.notesContent;
+
+      // Handle meta parsing
+      const metaResult = this.handleMetaParsing(line, lastTaskId, inMeta, metaContent);
+      inMeta = metaResult.inMeta;
+      metaContent = metaResult.metaContent;
+
+      // Handle issues parsing
+      const issuesResult = this.handleIssuesParsing(line, lastTaskId, inIssues, currentIssue, inResponses);
+      inIssues = issuesResult.inIssues;
+      currentIssue = issuesResult.currentIssue;
+      inResponses = issuesResult.inResponses;
+    }
+
+    // Save the last issue if exists
+    if (currentIssue && lastTaskId) {
+      this.saveIssue(currentIssue, lastTaskId);
+    }
+
+    // Save timeline events if exists
+    if (timelineEvents.length > 0 && lastTaskId) {
+      this.saveTimelineEvents(lastTaskId, timelineEvents);
+    }
+
+    // Save related links if exists
+    if (relatedLinks.length > 0 && lastTaskId) {
+      this.saveRelatedLinks(lastTaskId, relatedLinks);
+    }
+
+    // Save notes if exists (even if empty)
+    if (lastTaskId) {
+      this.saveNotes(lastTaskId, notesContent);
+    }
+
+    // Save meta if exists
+    if (metaContent.length > 0 && lastTaskId) {
+      this.saveMeta(lastTaskId, metaContent);
+    }
+
+  return { ok: true };
 }
 
 exportTodoMd(): string {
@@ -1105,15 +1139,15 @@ exportTodoMd(): string {
     
     // Reviews
     const revs = this.db.prepare(`SELECT * FROM reviews WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
-    for (const v of revs) {
+      for (const v of revs) {
       const timestamp = new Date(v.at).toISOString();
       const note = v.note ? ` note "${v.note}"` : '';
       timelineEvents.push(`- ${timestamp} | REVIEW ${v.decision} by ${v.by}${note}`);
-    }
+      }
     
     // Comments
     const coms = this.db.prepare(`SELECT * FROM review_comments WHERE task_id=? ORDER BY at ASC`).all(r.id) as any[];
-    for (const c of coms) {
+      for (const c of coms) {
       const timestamp = new Date(c.at).toISOString();
       timelineEvents.push(`- ${timestamp} | COMMENT by ${c.by} note "${c.text}"`);
     }

@@ -92,10 +92,10 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Database queries are too slow
 - **Tags**: performance, database
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: I'll optimize the queries
-- 2025-01-16T11:00:00Z by reviewer1: Please add indexes
-- 2025-01-16T12:00:00Z by developer1 (internal): Working on it
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "I'll optimize the queries"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Please add indexes"
+  - 2025-01-16T12:00:00Z by developer1 (comment): "Working on it" (internal)
 
 #### Issue 2: Code Style
 - **Status**: Resolved
@@ -107,9 +107,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Inconsistent indentation
 - **Tags**: style, formatting
 
-**Responses:**
-- 2025-01-16T09:45:00Z by developer2: Fixed the indentation
-- 2025-01-16T10:30:00Z by reviewer2: Looks good, resolved
+- Responses:
+  - 2025-01-16T09:45:00Z by developer2 (comment): "Fixed the indentation"
+  - 2025-01-16T10:30:00Z by reviewer2 (comment): "Looks good, resolved"
 
 #### Issue 3: Security Vulnerability
 - **Status**: Closed
@@ -122,10 +122,10 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: SQL injection vulnerability found
 - **Tags**: security, critical
 
-**Responses:**
-- 2025-01-16T08:15:00Z by developer3: Investigating the issue
-- 2025-01-16T09:00:00Z by developer3: Fixed with parameterized queries
-- 2025-01-16T09:15:00Z by security-team: Verified fix, closing issue
+- Responses:
+  - 2025-01-16T08:15:00Z by developer3 (comment): "Investigating the issue"
+  - 2025-01-16T09:00:00Z by developer3 (comment): "Fixed with parameterized queries"
+  - 2025-01-16T09:15:00Z by security-team (comment): "Verified fix, closing issue"
 `;
 
       // TODO.mdをインポート
@@ -189,7 +189,8 @@ describe('TODO.md Issues Integration Tests', () => {
         method: 'get_issue_responses',
         params: {
           session: sessionId,
-          issue_id: performanceIssue.id
+          issue_id: performanceIssue.id,
+          include_internal: true
         }
       });
 
@@ -240,9 +241,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Main issue description
 - **Tags**: main, bug
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: Working on it
-- 2025-01-16T11:00:00Z by reviewer1: Please provide more details
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "Working on it"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Please provide more details"
 
 #### Issue 2: Related Issue
 - **Status**: Open
@@ -253,9 +254,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Related enhancement
 - **Tags**: enhancement, related
 
-**Responses:**
-- 2025-01-16T10:30:00Z by developer2: This is a good idea
-- 2025-01-16T11:30:00Z by reviewer2: Let's discuss this further
+- Responses:
+  - 2025-01-16T10:30:00Z by developer2 (comment): "This is a good idea"
+  - 2025-01-16T11:30:00Z by reviewer2 (comment): "Let's discuss this further"
 `;
 
       // TODO.mdをインポート
@@ -286,7 +287,8 @@ describe('TODO.md Issues Integration Tests', () => {
           method: 'get_issue_responses',
           params: {
             session: sessionId,
-            issue_id: issue.id
+            issue_id: issue.id,
+            include_internal: true
           }
         });
 
@@ -325,9 +327,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Issue with special characters: <>&"' and unicode: 日本語
 - **Tags**: special, unicode, symbols
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: Handling special chars: <>&"'
-- 2025-01-16T11:00:00Z by reviewer1: Unicode test: 日本語文字
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "Handling special chars: <>&\"'"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Unicode test: 日本語文字"
 `;
 
       // TODO.mdをインポート
@@ -364,7 +366,8 @@ describe('TODO.md Issues Integration Tests', () => {
         method: 'get_issue_responses',
         params: {
           session: sessionId,
-          issue_id: specialIssue.id
+          issue_id: specialIssue.id,
+          include_internal: true
         }
       });
 

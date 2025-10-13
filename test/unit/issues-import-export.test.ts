@@ -16,21 +16,10 @@ describe('Issues Import/Export Tests', () => {
   });
 
   beforeEach(() => {
-    // 各テスト前にデータをクリア
-    try {
-      db.db.exec('DELETE FROM issue_responses');
-      db.db.exec('DELETE FROM issue_relations');
-      db.db.exec('DELETE FROM review_issues');
-      db.db.exec('DELETE FROM task_state_history');
-      db.db.exec('DELETE FROM reviews');
-      db.db.exec('DELETE FROM review_comments');
-      db.db.exec('DELETE FROM tasks');
-    } catch (e) {
-      // データベースが破損している場合は再作成
-      db.close();
-      fs.rmSync(path.join(tmpDir, dbFile), { force: true });
-      db = new DB(tmpDir, dbFile, casDir);
-    }
+    // データベースを完全に再作成
+    db.close();
+    fs.rmSync(path.join(tmpDir, dbFile), { force: true });
+    db = new DB(tmpDir, dbFile, casDir);
   });
 
   afterAll(() => {
@@ -48,12 +37,13 @@ describe('Issues Import/Export Tests', () => {
 
 ## [T-ISSUE-1] Test Task {state: IN_PROGRESS}
 
-Issues:
-- **Critical**: Security vulnerability in authentication
-  - Status: Open
-  - Priority: Critical
-  - Category: Security
-  - Severity: Critical
+### Issues:
+
+#### Issue 1: Security vulnerability in authentication
+  - **Status**: Open
+  - **Priority**: Critical
+  - **Category**: Security
+  - **Severity**: Critical
   - Created: 2025-01-16T09:00:00Z by reviewer1
   - Due: 2025-01-20T00:00:00Z
   - Tags: [security, sql-injection, authentication]
@@ -62,11 +52,11 @@ Issues:
     - 2025-01-16T15:00:00Z by reviewer1 (comment): "Verified fix, looks good"
     - 2025-01-16T15:05:00Z by reviewer1 (resolution): "Issue resolved"
 
-- **High**: Password hashing using weak algorithm
-  - Status: Resolved
-  - Priority: High
-  - Category: Security
-  - Severity: High
+#### Issue 2: Password hashing using weak algorithm
+  - **Status**: Resolved
+  - **Priority**: High
+  - **Category**: Security
+  - **Severity**: High
   - Created: 2025-01-16T09:02:00Z by reviewer1
   - Resolved: 2025-01-16T16:00:00Z by developer1
   - Tags: [security, password, hashing]
@@ -83,7 +73,7 @@ Issues:
       expect(task?.title).toBe('Test Task');
 
       // 指摘が作成されていることを確認
-      const issues = db.db.prepare('SELECT * FROM review_issues WHERE task_id = ?').all('T-ISSUE-1');
+      const issues = db.issuesManager.getIssuesForTask('T-ISSUE-1');
       expect(issues).toHaveLength(2);
 
       // 最初の指摘の詳細確認
@@ -103,10 +93,10 @@ Issues:
       expect(issue2.resolved_by).toBe('developer1');
 
       // 対応が作成されていることを確認
-      const responses1 = db.db.prepare('SELECT * FROM issue_responses WHERE issue_id = ?').all(issue1.id);
+      const responses1 = db.issuesManager.getIssueResponses(issue1.id);
       expect(responses1).toHaveLength(3);
 
-      const responses2 = db.db.prepare('SELECT * FROM issue_responses WHERE issue_id = ?').all(issue2.id);
+      const responses2 = db.issuesManager.getIssueResponses(issue2.id);
       expect(responses2).toHaveLength(2);
     });
 
@@ -115,17 +105,18 @@ Issues:
 
 ## [T-ISSUE-2] Simple Task {state: DRAFT}
 
-Issues:
-- **Medium**: Code style issue
-  - Status: Open
-  - Priority: Medium
-  - Category: Style
+### Issues:
+
+#### Issue 1: Code style issue
+  - **Status**: Open
+  - **Priority**: Medium
+  - **Category**: Style
   - Created: 2025-01-16T10:00:00Z by reviewer1
 `;
 
       db.importTodoMd(todoMd);
 
-      const issues = db.db.prepare('SELECT * FROM review_issues WHERE task_id = ?').all('T-ISSUE-2');
+      const issues = db.issuesManager.getIssuesForTask('T-ISSUE-2');
       expect(issues).toHaveLength(1);
 
       const issue = issues[0];
@@ -135,7 +126,7 @@ Issues:
       expect(issue.category).toBe('style');
 
       // 対応がないことを確認
-      const responses = db.db.prepare('SELECT * FROM issue_responses WHERE issue_id = ?').all(issue.id);
+      const responses = db.issuesManager.getIssueResponses(issue.id);
       expect(responses).toHaveLength(0);
     });
 
@@ -144,11 +135,12 @@ Issues:
 
 ## [T-ISSUE-3] Internal Task {state: IN_PROGRESS}
 
-Issues:
-- **Low**: Minor documentation issue
-  - Status: Open
-  - Priority: Low
-  - Category: Documentation
+### Issues:
+
+#### Issue 1: Minor documentation issue
+  - **Status**: Open
+  - **Priority**: Low
+  - **Category**: Documentation
   - Created: 2025-01-16T11:00:00Z by reviewer1
   - Responses:
     - 2025-01-16T12:00:00Z by developer1 (comment): "Working on this"
@@ -157,14 +149,14 @@ Issues:
 
       db.importTodoMd(todoMd);
 
-      const issues = db.db.prepare('SELECT * FROM review_issues WHERE task_id = ?').all('T-ISSUE-3');
+      const issues = db.issuesManager.getIssuesForTask('T-ISSUE-3');
       expect(issues).toHaveLength(1);
 
-      const responses = db.db.prepare('SELECT * FROM issue_responses WHERE issue_id = ?').all(issues[0].id);
+      const responses = db.issuesManager.getIssueResponses(issues[0].id, true);
       expect(responses).toHaveLength(2);
 
-      const publicResponses = responses.filter(r => r.is_internal === 0);
-      const internalResponses = responses.filter(r => r.is_internal === 1);
+      const publicResponses = responses.filter(r => !r.is_internal);
+      const internalResponses = responses.filter(r => r.is_internal);
 
       expect(publicResponses).toHaveLength(1);
       expect(internalResponses).toHaveLength(1);
