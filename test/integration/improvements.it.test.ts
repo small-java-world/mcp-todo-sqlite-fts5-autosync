@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import WebSocket from 'ws';
-import { spawn } from 'child_process';
-import path from 'path';
+import { startIntegrationServer, stopIntegrationServer, cleanIntegrationData, type ServerHandle } from './support/server';
 
-const TOKEN = process.env.MCP_TOKEN || 'devtoken';
+let serverHandle: ServerHandle;
+let TOKEN: string;
 
 function rpc(ws: WebSocket, method: string, params?: any): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -29,8 +29,9 @@ describe('Server Improvements Integration', () => {
   let sessionId: string;
 
   beforeAll(async () => {
-    // サーバーが既に起動していることを前提とする
-    ws = new WebSocket('ws://127.0.0.1:8765');
+    serverHandle = await startIntegrationServer();
+    TOKEN = serverHandle.token;
+    ws = new WebSocket(`ws://127.0.0.1:${serverHandle.port}`);
     await new Promise(res => ws.on('open', res));
     const registerResult = await rpc(ws, 'register', { authToken: TOKEN });
     sessionId = registerResult.session;
@@ -38,6 +39,8 @@ describe('Server Improvements Integration', () => {
 
   afterAll(async () => {
     try { ws.close(); } catch {}
+    await stopIntegrationServer(serverHandle);
+    cleanIntegrationData(serverHandle);
   });
 
   beforeEach(async () => {

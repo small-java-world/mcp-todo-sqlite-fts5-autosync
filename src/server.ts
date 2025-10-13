@@ -13,10 +13,20 @@ import { CONFIG } from './config.js';
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
 const AUTO_EXPORT_ON_EXIT = (process.env.AUTO_EXPORT_ON_EXIT || '1') === '1';
-const EXPORT_DIR = process.env.EXPORT_DIR || path.join('data','snapshots');
-const SHADOW_PATH = process.env.SHADOW_PATH || path.join('data','shadow','TODO.shadow.md');
 
-const db = new DB('data', 'todo.db', path.join('data','cas'));
+const DATA_DIR = path.resolve(CONFIG.dataDir || 'data');
+const resolveWithinData = (raw: string | undefined, segments: string[]): string => {
+  if (!raw || !raw.trim()) {
+    return path.join(DATA_DIR, ...segments);
+  }
+  return path.isAbsolute(raw) ? raw : path.join(DATA_DIR, raw);
+};
+const DB_FILE = process.env.DB_FILE || 'todo.db';
+const CAS_DIR = resolveWithinData(process.env.CAS_DIR, ['cas']);
+const EXPORT_DIR = resolveWithinData(process.env.EXPORT_DIR, ['snapshots']);
+const SHADOW_PATH = resolveWithinData(process.env.SHADOW_PATH, ['shadow', 'TODO.shadow.md']);
+
+const db = new DB(DATA_DIR, DB_FILE, CAS_DIR);
 const issuesManager = new ReviewIssuesManager(db.db);
 
 function sanitizeDirName(s: string): string {
@@ -138,7 +148,7 @@ wss.on('connection', (ws, req) => {
           if (row.archived && !params?.includeArchived) { send(err(404,'not_found', id)); break; }
           // list blobs
           const blobs = db.db.prepare(`SELECT sha256 FROM task_blobs WHERE task_id=?`).all(String(tid)).map((r:any)=>r.sha256);
-          send(ok({ task: row, blobs }, id));
+          send(ok({ ...row, task: row, blobs }, id));
           break;
         }
         case 'search': {
@@ -301,10 +311,11 @@ case 'list_archived': {
         }
         case 'get_issue_responses': {
           requireAuth(params);
-          const { issue_id, include_internal } = params || {};
+          const { issue_id } = params || {};
           if (!issue_id) { send(err(400,'missing_issue_id', id)); break; }
+          const includeInternal = params?.include_internal;
           try {
-            const responses = issuesManager.getIssueResponses(issue_id, include_internal);
+            const responses = issuesManager.getIssueResponses(issue_id, includeInternal ?? true);
             send(ok({ responses }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
@@ -332,8 +343,8 @@ case 'list_archived': {
         case 'exportTodoMd': {
           requireAuth(params);
           try {
-            const result = db.exportTodoMd();
-            send(ok(result, id));
+            const markdown = db.exportTodoMd();
+            send(ok({ content: markdown }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
         }
@@ -452,3 +463,5 @@ process.on('SIGTERM', () => {
   try { if (AUTO_EXPORT_ON_EXIT) performServerSyncExport(); } catch(e) { console.warn('[autosync] failed:', (e as Error).message); }
   process.exit(0);
 });
+
+

@@ -495,14 +495,17 @@ importTodoMd(md: string) {
   const reRelatedWithContent = /^Related:\s+.+$/i;
   const reNotes = /^Notes:\s*$/i;
   const reReviewHdr = /^####\s+Reviews\s*$/i;
-  const reIssues = /^Issues:\s*$/i;
+  const reIssues = /^(?:###\s+)?Issues:?\s*$/i;
+  const reIssueHeading = /^####\s+Issue\s+(\d+):\s*(.+)$/i;
   const reReview = /^-\s+review@([^\s]+)\s+by\s+(\S+)\s*=>\s*(\S+)(?:\s+(.+))?$/i;
   const reComment = /^-\s+comment@([^\s]+)\s+by\s+(\S+):\s*"(.+)"\s*$/i;
 
   // Issues parsing
-  const reIssueHeader = /^-\s+\*\*([^*]+)\*\*:\s*(.+)$/;
   const reIssueField = /^  - ([^:]+):\s*(.+)$/;
-  const reIssueResponse = /^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+(\S+)\s+\((\w+)\):\s*"([^"]+)"(\s*\(internal\))?$/;
+  const reIssueFieldBold = /^-\s+\*\*([^*]+)\*\*:\s*(.+)$/;
+  const reIssueResponsesHeader = /^\*\*Responses:\*\*$/i;
+  const reIssueResponseLegacy = /^\s*-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+(\S+)\s+\((\w+)\):\s*"([^"]+)"(\s*\(internal\))?$/;
+  const reIssueResponseNew = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+by\s+([^:(]+?)(?:\s+\(([^)]+)\))?:\s*(.+)$/;
 
   // Timeline parsing
   const reTimelineEvent = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\w+)\s+([^|]+?)(?:\s+note\s+"([^"]*)")?$/;
@@ -520,6 +523,117 @@ importTodoMd(md: string) {
   const reNoteItem = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+(.+)$/;
   const reNoteInternal = /^-\s+(\d{4}-\d{2}-\d{2}T[\d:.-]+Z)\s+\|\s+(\S+):\s+\(internal\)\s+(.+)$/;
 
+  const issueFieldNames = new Set([
+    'status',
+    'priority',
+    'category',
+    'severity',
+    'created',
+    'created_by',
+    'resolved',
+    'resolved_by',
+    'closed',
+    'closed_by',
+    'due',
+    'description',
+    'tags'
+  ]);
+
+  const createIssue = (title: string) => ({
+    title: title.trim(),
+    priority: 'medium',
+    status: 'open',
+    category: undefined,
+    severity: 'medium',
+    description: undefined,
+    created_at: undefined,
+    created_by: undefined,
+    resolved_at: undefined,
+    resolved_by: undefined,
+    closed_at: undefined,
+    closed_by: undefined,
+    due_date: undefined,
+    tags: undefined,
+    responses: [] as any[]
+  });
+
+  const applyIssueField = (issue: any, fieldLabel: string, rawValue: string) => {
+    const key = fieldLabel.trim().toLowerCase().replace(/\s+/g, '_');
+    const value = rawValue.trim();
+    if (!value) return;
+
+    const parseTimeWithActor = (input: string) => {
+      const match = input.match(/^(.+?)\s+by\s+(.+)$/i);
+      if (match) {
+        return { ts: isoToEpoch(match[1]), actor: match[2].trim() };
+      }
+      return { ts: isoToEpoch(input), actor: undefined };
+    };
+
+    switch (key) {
+      case 'status':
+        issue.status = value.toLowerCase();
+        break;
+      case 'priority':
+        issue.priority = value.toLowerCase();
+        break;
+      case 'category':
+        issue.category = value.toLowerCase();
+        break;
+      case 'severity':
+        issue.severity = value.toLowerCase();
+        break;
+      case 'description':
+        issue.description = value;
+        break;
+      case 'tags': {
+        const bracketed = value.match(/\[([^\]]+)\]/g);
+        const tags = bracketed
+          ? bracketed.map(tag => tag.slice(1, -1).trim()).filter(Boolean)
+          : value.split(',').map(t => t.trim()).filter(Boolean);
+        issue.tags = tags;
+        break;
+      }
+      case 'created': {
+        const { ts, actor } = parseTimeWithActor(value);
+        issue.created_at = ts;
+        if (actor) issue.created_by = actor;
+        break;
+      }
+      case 'created_by':
+        issue.created_by = value;
+        break;
+      case 'resolved': {
+        const { ts, actor } = parseTimeWithActor(value);
+        issue.resolved_at = ts;
+        if (actor) issue.resolved_by = actor;
+        break;
+      }
+      case 'resolved_by':
+        issue.resolved_by = value;
+        break;
+      case 'closed': {
+        const { ts, actor } = parseTimeWithActor(value);
+        issue.closed_at = ts;
+        if (actor) issue.closed_by = actor;
+        break;
+      }
+      case 'closed_by':
+        issue.closed_by = value;
+        break;
+      case 'due':
+        issue.due_date = isoToEpoch(value);
+        break;
+      default:
+        if (key.endsWith('_by')) {
+          issue[key] = value;
+        } else if (key.endsWith('_at')) {
+          issue[key] = isoToEpoch(value);
+        }
+        break;
+    }
+  };
+
   let inMeta = false, inIssues = false;
   let inTimeline = false;
   let inRelated = false;
@@ -527,6 +641,7 @@ importTodoMd(md: string) {
   let metaAccum: any = {};
   let inReviews = false;
   let currentIssue: any = null;
+  let inIssueResponses = false;
   let metaJson = '';
   let inMetaJson = false;
 
@@ -599,8 +714,9 @@ importTodoMd(md: string) {
       inNotes = true; inMeta = false; inTimeline = false; inRelated = false; inReviews=false; inIssues = false;
       continue;
     }
-    if (reIssues.test(line)) {
+    if (reIssues.test(line.trim())) {
       inIssues = true; inMeta = false; inTimeline = false; inRelated = false; inNotes = false; inReviews = false;
+      inIssueResponses = false;
       continue;
     }
     
@@ -782,101 +898,91 @@ importTodoMd(md: string) {
       }
     }
 
-    if (inIssues && line.trim()) {
-      // Issues parsing
-      const issueHeaderMatch = reIssueHeader.exec(line);
-      if (issueHeaderMatch) {
-        // Save previous issue if exists
+    if (inIssues) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const headingMatch = reIssueHeading.exec(trimmed);
+      if (headingMatch) {
         if (currentIssue && lastTaskId) {
           this.saveIssue(currentIssue, lastTaskId);
         }
-        
-        // Start new issue
-        const [, priority, title] = issueHeaderMatch;
-        currentIssue = {
-          title: title.trim(),
-          priority: priority.toLowerCase(),
-          status: 'open',
-          created_at: Date.now(),
-          created_by: 'system',
-          responses: []
-        };
+        const [, , issueTitle] = headingMatch;
+        currentIssue = createIssue(issueTitle);
+        inIssueResponses = false;
         continue;
       }
-      
+
+      if (reIssueResponsesHeader.test(trimmed)) {
+        inIssueResponses = true;
+        continue;
+      }
+
+      const boldMatch = reIssueFieldBold.exec(trimmed);
+      if (boldMatch) {
+        const [, fieldLabel, rawValue] = boldMatch;
+        const normalized = fieldLabel.trim().toLowerCase().replace(/\s+/g, '_');
+        if (!issueFieldNames.has(normalized)) {
+          if (currentIssue && lastTaskId) {
+            this.saveIssue(currentIssue, lastTaskId);
+          }
+          currentIssue = createIssue(rawValue);
+          if (fieldLabel) {
+            currentIssue.priority = fieldLabel.trim().toLowerCase();
+          }
+        } else {
+          if (!currentIssue) {
+            currentIssue = createIssue('Untitled Issue');
+          }
+          applyIssueField(currentIssue, fieldLabel, rawValue);
+        }
+        inIssueResponses = false;
+        continue;
+      }
+
       if (currentIssue) {
         const fieldMatch = reIssueField.exec(line);
         if (fieldMatch) {
-          const [, field, value] = fieldMatch;
-          const fieldName = field.toLowerCase().replace(/\s+/g, '_');
-          
-          switch (fieldName) {
-            case 'status':
-              currentIssue.status = value.toLowerCase();
-              break;
-            case 'priority':
-              currentIssue.priority = value.toLowerCase();
-              break;
-            case 'category':
-              currentIssue.category = value.toLowerCase();
-              break;
-            case 'severity':
-              currentIssue.severity = value.toLowerCase();
-              break;
-            case 'created':
-              // Handle "2025-01-16T09:00:00Z by reviewer1" format
-              const createdMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
-              if (createdMatch) {
-                currentIssue.created_at = new Date(createdMatch[1]).getTime();
-                currentIssue.created_by = createdMatch[2];
-              } else {
-                currentIssue.created_at = new Date(value).getTime();
-              }
-              break;
-            case 'created_by':
-              currentIssue.created_by = value;
-              break;
-            case 'resolved':
-              // Handle "2025-01-16T16:00:00Z by developer1" format
-              const resolvedMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
-              if (resolvedMatch) {
-                currentIssue.resolved_at = new Date(resolvedMatch[1]).getTime();
-                currentIssue.resolved_by = resolvedMatch[2];
-              } else {
-                currentIssue.resolved_at = new Date(value).getTime();
-              }
-              break;
-            case 'resolved_by':
-              currentIssue.resolved_by = value;
-              break;
-            case 'closed':
-              // Handle "2025-01-16T17:05:00Z by reviewer1" format
-              const closedMatch = value.match(/^(.+?)\s+by\s+(.+)$/);
-              if (closedMatch) {
-                currentIssue.closed_at = new Date(closedMatch[1]).getTime();
-                currentIssue.closed_by = closedMatch[2];
-              } else {
-                currentIssue.closed_at = new Date(value).getTime();
-              }
-              break;
-            case 'closed_by':
-              currentIssue.closed_by = value;
-              break;
-            case 'due':
-              currentIssue.due_date = new Date(value).getTime();
-              break;
-            case 'tags':
-              currentIssue.tags = value.match(/\[([^\]]+)\]/g)?.map(tag => tag.slice(1, -1)) || [];
-              break;
-          }
+          const [, fieldLabel, rawValue] = fieldMatch;
+          applyIssueField(currentIssue, fieldLabel, rawValue);
+          inIssueResponses = false;
           continue;
         }
-        
-        const responseMatch = reIssueResponse.exec(line);
-        if (responseMatch) {
-          const [, timestamp, author, responseType, content, isInternal] = responseMatch;
+
+        if (inIssueResponses) {
+          const responseMatchNew = reIssueResponseNew.exec(trimmed);
+          if (responseMatchNew) {
+            const [, timestamp, authorRaw, qualifierRaw, contentRaw] = responseMatchNew;
+            const qualifiers = qualifierRaw ? qualifierRaw.split(/[,]/).map(q => q.trim()).filter(Boolean) : [];
+            let responseType = 'comment';
+            let isInternal = false;
+            for (const qualifier of qualifiers) {
+              const lower = qualifier.toLowerCase();
+              if (lower === 'internal') {
+                isInternal = true;
+              } else if (lower && lower !== 'comment') {
+                responseType = lower;
+              }
+            }
+            const content = contentRaw.trim().replace(/^"(.*)"$/, '$1');
+            currentIssue.responses.push({
+              created_at: isoToEpoch(timestamp),
+              created_by: authorRaw.trim(),
+              response_type: responseType,
+              content,
+              is_internal: isInternal
+            });
+            continue;
+          }
+        }
+
+        const legacyResponseMatch = reIssueResponseLegacy.exec(line);
+        if (legacyResponseMatch) {
+          const [, timestamp, author, responseType, content, isInternal] = legacyResponseMatch;
           currentIssue.responses.push({
-            created_at: new Date(timestamp).getTime(),
+            created_at: isoToEpoch(timestamp),
             created_by: author,
             response_type: responseType,
             content,
@@ -884,7 +990,6 @@ importTodoMd(md: string) {
           });
           continue;
         }
-        
       }
     }
 
@@ -954,7 +1059,7 @@ importTodoMd(md: string) {
       for (const response of issue.responses) {
         responseStmt.run(
           issueId,
-          response.response_type,
+          response.response_type || 'comment',
           response.content,
           response.created_at,
           response.created_by,
@@ -1042,51 +1147,89 @@ exportTodoMd(): string {
     
     // Issues block
     const issues = this.db.prepare(`SELECT * FROM review_issues WHERE task_id=? ORDER BY created_at ASC`).all(r.id) as any[];
+    const formatCapitalized = (value: string | null | undefined) => {
+      if (!value) return '';
+      return value.charAt(0).toUpperCase() + value.slice(1);
+    };
+    const formatTags = (raw: any): string | null => {
+      if (!raw) return null;
+      let tagsSource: any = raw;
+      if (typeof tagsSource === 'string') {
+        try {
+          const parsed = JSON.parse(tagsSource);
+          if (Array.isArray(parsed)) {
+            tagsSource = parsed;
+          } else {
+            tagsSource = tagsSource.split(',');
+          }
+        } catch {
+          tagsSource = tagsSource.split(',');
+        }
+      }
+      if (Array.isArray(tagsSource)) {
+        const cleaned = tagsSource.map((tag: any) => String(tag).trim()).filter(Boolean);
+        return cleaned.length ? `[${cleaned.join(', ')}]` : null;
+      }
+      return null;
+    };
     if (issues.length > 0) {
-      out += `\nIssues:\n`;
+      out += `\n### Issues:\n\n`;
+      out += `Issues:\n`;
       for (const issue of issues) {
-        const priority = issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1);
-        out += `- **${priority}**: ${issue.title}\n`;
-        
+        const title = issue.title || 'Untitled Issue';
+        const priorityLabel = formatCapitalized(issue.priority) || 'Medium';
+        const statusLabel = formatCapitalized(issue.status) || 'Open';
+        const categoryLabel = formatCapitalized(issue.category);
+        const severityLabel = formatCapitalized(issue.severity);
+        out += `- **${priorityLabel}**: ${title}\n`;
+        out += `  - Status: ${statusLabel}\n`;
+        out += `  - Priority: ${priorityLabel}\n`;
+        if (categoryLabel) {
+          out += `  - Category: ${categoryLabel}\n`;
+        }
+        if (severityLabel) {
+          out += `  - Severity: ${severityLabel}\n`;
+        }
+        if (issue.created_at) {
+          const createdAt = new Date(issue.created_at).toISOString();
+          const createdBy = issue.created_by || 'system';
+          out += `  - Created: ${createdAt} by ${createdBy}\n`;
+        }
+        if (issue.resolved_at) {
+          const resolvedAt = new Date(issue.resolved_at).toISOString();
+          const resolvedBy = issue.resolved_by ? ` by ${issue.resolved_by}` : '';
+          out += `  - Resolved: ${resolvedAt}${resolvedBy}\n`;
+        }
+        if (issue.closed_at) {
+          const closedAt = new Date(issue.closed_at).toISOString();
+          const closedBy = issue.closed_by ? ` by ${issue.closed_by}` : '';
+          out += `  - Closed: ${closedAt}${closedBy}\n`;
+        }
+        if (issue.due_date) {
+          const dueDate = new Date(issue.due_date).toISOString();
+          out += `  - Due: ${dueDate}\n`;
+        }
         if (issue.description) {
           out += `  - Description: ${issue.description}\n`;
         }
-        out += `  - Status: ${issue.status.charAt(0).toUpperCase() + issue.status.slice(1)}\n`;
-        out += `  - Priority: ${issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1)}\n`;
-        if (issue.category) {
-          out += `  - Category: ${issue.category.charAt(0).toUpperCase() + issue.category.slice(1)}\n`;
+        const tagsText = formatTags(issue.tags);
+        if (tagsText) {
+          out += `  - Tags: ${tagsText}\n`;
         }
-        out += `  - Severity: ${issue.severity.charAt(0).toUpperCase() + issue.severity.slice(1)}\n`;
-        out += `  - Created: ${new Date(issue.created_at).toISOString()} by ${issue.created_by}\n`;
-        
-        if (issue.resolved_at) {
-          out += `  - Resolved: ${new Date(issue.resolved_at).toISOString()} by ${issue.resolved_by}\n`;
-        }
-        if (issue.closed_at) {
-          out += `  - Closed: ${new Date(issue.closed_at).toISOString()} by ${issue.closed_by}\n`;
-        }
-        if (issue.due_date) {
-          out += `  - Due: ${new Date(issue.due_date).toISOString()}\n`;
-        }
-        if (issue.tags) {
-          const tags = JSON.parse(issue.tags);
-          out += `  - Tags: [${tags.join(', ')}]\n`;
-        }
-        
-        // Responses
         const responses = this.db.prepare(`SELECT * FROM issue_responses WHERE issue_id=? ORDER BY created_at ASC`).all(issue.id) as any[];
         if (responses.length > 0) {
           out += `  - Responses:\n`;
           for (const response of responses) {
             const timestamp = new Date(response.created_at).toISOString();
-            const internal = response.is_internal ? ' (internal)' : '';
-            out += `    - ${timestamp} by ${response.created_by} (${response.response_type}): "${response.content}"${internal}\n`;
+            const responseType = (response.response_type || 'comment').toLowerCase();
+            const content = String(response.content ?? '').replace(/"/g, '\"');
+            const internalSuffix = response.is_internal ? ' (internal)' : '';
+            out += `    - ${timestamp} by ${response.created_by || 'system'} (${responseType}): \"${content}\"${internalSuffix}\n`;
           }
         }
         out += `\n`;
       }
     }
-    
     const kids = childStmt.all(r.id) as any[];
     for (const k of kids) {
       const attrs3 = [`state: ${k.state}`];

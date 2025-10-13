@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import WebSocket from 'ws';
-import fs from 'fs';
-import path from 'path';
+import { startIntegrationServer, stopIntegrationServer, cleanIntegrationData, type ServerHandle } from './support/server';
 
-const SERVER_URL = 'ws://localhost:8765';
-const AUTH_TOKEN = 'devtoken';
+let serverHandle: ServerHandle;
+let SERVER_URL: string;
+let AUTH_TOKEN: string;
 
 describe('TODO.md Issues Integration Tests', () => {
   let ws: WebSocket;
@@ -12,19 +12,14 @@ describe('TODO.md Issues Integration Tests', () => {
   let messageId = 0;
 
   beforeAll(async () => {
-    // サーバーが起動していることを確認
-    const testWs = new WebSocket(SERVER_URL);
-    await new Promise((resolve, reject) => {
-      testWs.on('open', () => {
-        testWs.close();
-        resolve(true);
-      });
-      testWs.on('error', reject);
-    });
+    serverHandle = await startIntegrationServer();
+    SERVER_URL = `ws://127.0.0.1:${serverHandle.port}`;
+    AUTH_TOKEN = serverHandle.token;
   });
 
   beforeEach(async () => {
     // 新しいWebSocket接続を作成
+    messageId = 0;
     ws = new WebSocket(SERVER_URL);
     
     await new Promise((resolve, reject) => {
@@ -47,13 +42,9 @@ describe('TODO.md Issues Integration Tests', () => {
     }
   });
 
-  afterAll(() => {
-    // テストデータのクリーンアップ
-    try {
-      fs.rmSync('data', { recursive: true, force: true });
-    } catch (e) {
-      // Ignore cleanup errors
-    }
+  afterAll(async () => {
+    await stopIntegrationServer(serverHandle);
+    cleanIntegrationData(serverHandle);
   });
 
   function sendRequest(request: any): Promise<any> {
