@@ -17,6 +17,7 @@ import {
   validateTaskId, 
   validatePositiveNumber 
 } from './db-validators.js';
+import { parseAttrs as mdParseAttrs, isoToEpoch as mdIsoToEpoch } from './markdown-importer.js';
 
 export type TaskRow = {
   id: string;
@@ -644,19 +645,9 @@ listArchived(limit=20, offset=0) {
 }
 
   // Helper functions for importTodoMd
-  private parseAttrs(s: string) {
-    const out: any = {};
-    s.split(',').forEach(kv => {
-      const m = kv.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$/);
-      if (m) out[m[1]] = m[2].replace(/^\{|\}$/g,'').trim();
-    });
-    return out;
-  }
+  private parseAttrs(s: string) { return mdParseAttrs(s); }
 
-  private isoToEpoch(s: string) {
-    const t = Date.parse(s);
-    return isNaN(t) ? Date.now() : t;
-  }
+  private isoToEpoch(s: string) { return mdIsoToEpoch(s); }
 
   // Regular expressions for importTodoMd
   private static readonly RE_L2 = /^## \[(.+?)\]\s+(.*?)(?:\s*\{([^}]*)\})?\s*$/;
