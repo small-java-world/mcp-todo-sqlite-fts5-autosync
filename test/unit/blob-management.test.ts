@@ -14,15 +14,30 @@ describe('Blob Management Tests', () => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+async function removeTempDir(dir: string) {
+  if (!fs.existsSync(dir)) return;
+  let lastError: NodeJS.ErrnoException | undefined;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      lastError = undefined;
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== 'EBUSY' && code !== 'EPERM') throw err;
+      lastError = err as NodeJS.ErrnoException;
+      await sleep(100 * (attempt + 1));
+    }
+  }
+  if (lastError) throw lastError;
+}
+
 afterEach(async () => {
   db.close();
+  // Give SQLite a moment to release file handles on Windows
+  await sleep(100);
   if (fs.existsSync(tempDir)) {
-    try {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    } catch {
-      await sleep(150);
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
-    }
+    await removeTempDir(tempDir);
   }
 });
 
