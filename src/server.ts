@@ -109,6 +109,79 @@ wss.on('connection', (ws, req) => {
   // Track watchers for this connection
   const connectionWatchers = new Set<WatchSubscription>();
 
+  // core handler map (段階的移行用)
+  const coreHandlers = new Map<string, (params: any, id: any) => Promise<void>>([
+    ['list_recent', async (params, id) => {
+      requireAuth(params);
+      const { limit } = params || {};
+      ws.send(stringify(ok({ items: db.listRecent(limit??20) }, id)));
+    }],
+    ['get_blob', async (params, id) => {
+      requireAuth(params);
+      const { sha256 } = params || {};
+      if (!sha256) { ws.send(stringify(err(400,'missing_sha256', id))); return; }
+      const p = db.getBlobPath(String(sha256));
+      if (!fs.existsSync(p)) { ws.send(stringify(err(404,'not_found', id))); return; }
+      const bytes = fs.readFileSync(p);
+      ws.send(stringify(ok({ bytes_base64: bytes.toString('base64'), size: bytes.length }, id)));
+    }],
+    ['get_task', async (params, id) => {
+      requireAuth(params);
+      const { id: tid } = params || {};
+      if (!tid) { ws.send(stringify(err(400,'missing_id', id))); return; }
+      const row = db.getTask(String(tid));
+      if (!row) { ws.send(stringify(err(404,'not_found', id))); return; }
+      if (row.archived && !params?.includeArchived) { ws.send(stringify(err(404,'not_found', id))); return; }
+      const blobs = db.db.prepare(`SELECT sha256 FROM task_blobs WHERE task_id=?`).all(String(tid)).map((r:any)=>r.sha256);
+      ws.send(stringify(ok({ ...row, task: row, blobs }, id)));
+    }],
+    ['upsert_task', async (params, id) => {
+      requireAuth(params);
+      const { id: tid, title, text, if_vclock } = params || {};
+      const metaArg = params && Object.prototype.hasOwnProperty.call(params, 'meta') ? params.meta : undefined;
+      if (!tid || !title || !text) { ws.send(stringify(err(400,'missing_fields', id))); return; }
+      try {
+        const vclock = db.upsertTask(String(tid), String(title), String(text), metaArg, typeof if_vclock==='number' ? if_vclock : undefined);
+        const task = db.getTask(String(tid));
+        broadcastChange('task', String(tid), 'upsert', task);
+        ws.send(stringify(ok({ vclock }, id)));
+      } catch (e: any) {
+        if (e.code === 409) ws.send(stringify(err(409, 'vclock_conflict', id)));
+        else ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['mark_done', async (params, id) => {
+      requireAuth(params);
+      const { id: tid, done, if_vclock } = params || {};
+      if (typeof done !== 'boolean' || !tid) { ws.send(stringify(err(400,'missing_fields', id))); return; }
+      try {
+        const vclock = db.markDone(String(tid), !!done, typeof if_vclock==='number'?if_vclock:undefined);
+        const task = db.getTask(String(tid));
+        broadcastChange('task', String(tid), 'mark_done', task);
+        ws.send(stringify(ok({ vclock }, id)));
+      } catch (e: any) {
+        if (e.code === 404) ws.send(stringify(err(404,'not_found', id)));
+        else if (e.code === 409) ws.send(stringify(err(409,'vclock_conflict', id)));
+        else ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['attach_blob', async (params, id) => {
+      requireAuth(params);
+      const { id: tid, sha256, bytes_base64 } = params || {};
+      if (!tid) { ws.send(stringify(err(400,'missing_task_id', id))); return; }
+      if (!sha256 && !bytes_base64) { ws.send(stringify(err(400,'missing_blob', id))); return; }
+      const buf = bytes_base64 ? Buffer.from(String(bytes_base64), 'base64') : null;
+      const provided = typeof sha256 === 'string' ? sha256.toLowerCase() : null;
+      const computed = buf ? crypto.createHash('sha256').update(buf).digest('hex') : null;
+      if (buf && provided && provided !== computed) { ws.send(stringify(err(400,'bad_blob_digest', id))); return; }
+      const digest = provided ?? computed;
+      if (!digest) { ws.send(stringify(err(400,'bad_blob', id))); return; }
+      if (buf) db.putBlob(digest, buf, buf.length);
+      db.db.prepare(`INSERT OR IGNORE INTO task_blobs(task_id, sha256) VALUES (?,?)`).run(String(tid), digest);
+      ws.send(stringify(ok({ sha256: digest, ok: true }, id)));
+    }],
+  ]);
+
   ws.on('message', (buf) => {
     let msg: any;
     try { msg = JSON.parse(buf.toString()); }
@@ -120,6 +193,13 @@ wss.on('connection', (ws, req) => {
     const send = (obj: any) => ws.send(stringify(obj));
 
     try {
+      // まずハンドラマップ経由のディスパッチを試行
+      if (coreHandlers.has(method)) {
+        coreHandlers.get(method)!(params, id).catch((e:any)=>{
+          const code = e?.code || 500; ws.send(stringify(err(code, e?.message||'error', id)));
+        });
+        return;
+      }
       switch (method) {
         case 'register': {
           if (TOKEN && params?.authToken !== TOKEN) { send(err(401,'unauthorized', id)); break; }
