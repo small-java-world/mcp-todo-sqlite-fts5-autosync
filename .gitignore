@@ -102,3 +102,6 @@ Thumbs.db
 
 # Test temporary directories
 temp_test_*/
+
+# Ignore Windows reserved-name file
+nul
