@@ -47,6 +47,11 @@ MCP_TOKEN=devtoken pnpm start
 - `importTodoMd({content}) -> {ok}` - TODO.md形式のインポート
 - `exportTodoMd() -> {content}` - TODO.md形式のエクスポート
 
+### Git Worktree バインディングAPI
+- `get_repo_binding()` → **Git worktree バインディング**（repoRoot/branch/policy）
+- `reserve_ids({n})` → **TODO用IDの中央採番**（例: `T-YYYYMMDD-###`）
+- `patch_todo_section({section, base_sha256, ops[]})` → **TODO.mdの行パッチ**（3階層＋1行1タスク前提）
+
 vclock はタスクごとの単調増加バージョン（楽観ロック）。`if_vclock` 不一致なら 409 を返します。
 
 ## 3) クライアント例
@@ -167,9 +172,33 @@ npm test test/integration/
 - TODO.md インポート/エクスポート機能
 - メタ構造化、タイムライン、関連、ノート機能
 
-## 12) MCP設定（Cursor / Claude Desktop / Codex CLI）
+## 12) 追加ドキュメント
 
-### 12.1 Cursor設定
+### エージェント向けドキュメント
+- `AGENT_BINDING.md` … エージェントが **「TODO由来のファイルは紐づくブランチにコミット」** を理解するための仕様
+- `AGENT_PROTOCOL.md` … エージェント/AI向けの運用プロトコル（Golden Rules と使用RPC）
+
+### 環境変数（worktree）
+- `GIT_REPO_ROOT`（プロジェクトの .git 管理側のルート。未指定時は `process.cwd()`）
+- `GIT_WORKTREES_DIR`（既定: `worktrees`）
+- `GIT_WORKTREE_ROOT`（明示worktreeがある場合に直接指定；通常は `ensure_worktree` を使用）
+- `GIT_AUTO_ENSURE_WORKTREE=true`（`get_repo_binding`で自動worktree作成を有効化）
+- `GIT_WORKTREE_NAME`（自動作成時のworktree名。未指定時はブランチ名をサニタイズ）
+- `GIT_BRANCH`（必須推奨）
+- `GIT_REMOTE=origin`
+- `GIT_COMMIT_ON_WRITE=true`
+- `GIT_SAFE_GLOBS=docs/**,src/**,.github/**`
+- `GIT_COMMIT_TEMPLATE="chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}"`
+- `GIT_SIGNOFF=true`
+- `GIT_ALLOWED_BRANCH_PREFIXES="feat/,fix/,chore/,refactor/"`（worktree作成を許可するブランチ接頭辞）
+
+## 便利RPC
+- `ensure_worktree({ branch, dirName })` → `<repoRoot>/<worktreesDir>/<dirName>` に worktree を作成（既存なら再利用）し、その worktree を `repoRoot` とするバインディングを返す。
+- `get_repo_binding()` → 既存worktreeがあれば返す。なければ`GIT_AUTO_ENSURE_WORKTREE=true`の場合、自動でworktreeを作成して返す。
+
+## 13) MCP設定（Cursor / Claude Desktop / Codex CLI）
+
+### 13.1 Cursor設定
 
 #### ローカル接続
 ```json
@@ -209,7 +238,7 @@ npm test test/integration/
 - macOS: `~/Library/Application Support/Cursor/User/settings.json`
 - Linux: `~/.config/Cursor/User/settings.json`
 
-### 12.2 Claude Desktop設定
+### 13.2 Claude Desktop設定
 
 #### ローカル接続
 ```json
@@ -249,7 +278,7 @@ npm test test/integration/
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
 - Linux: `~/.config/claude/claude_desktop_config/mcp_servers/mcp-todo-server.json`
 
-### 12.3 Codex CLI設定
+### 13.3 Codex CLI設定
 
 #### ローカル接続
 ```bash
@@ -271,7 +300,7 @@ export MCP_TOKEN="devtoken"
 codex --mcp-server-url $MCP_SERVER_URL --mcp-token $MCP_TOKEN
 ```
 
-### 12.4 リモート接続のための設定
+### 13.4 リモート接続のための設定
 
 #### サーバー側（MCP TODO Server）
 ```bash
@@ -293,7 +322,7 @@ $env:MCP_SERVER_IP="192.168.1.9"; node remote_client.js
 2. **IPアドレス確認**: `ipconfig` (Windows) / `ifconfig` (macOS/Linux)
 3. **ネットワーク確認**: 同一ネットワーク内であることを確認
 
-### 12.5 トラブルシューティング
+### 13.5 トラブルシューティング
 
 #### 接続エラーの場合
 1. **ファイアウォール確認**: ポート8765が開放されているか

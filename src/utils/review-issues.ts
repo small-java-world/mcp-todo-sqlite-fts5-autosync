@@ -324,4 +324,21 @@ export class ReviewIssuesManager {
       tags: row.tags ? JSON.parse(row.tags) : []
     }));
   }
+
+  // タスクの指摘を取得
+  getIssuesForTask(taskId: string): ReviewIssue[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM review_issues 
+      WHERE task_id = ? 
+      ORDER BY created_at DESC
+    `);
+    
+    const rows = stmt.all(taskId) as any[];
+    
+    return rows.map(row => ({
+      ...row,
+      tags: row.tags ? JSON.parse(row.tags) : []
+    }));
+  }
+
 }

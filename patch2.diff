@@ -1,0 +1,166 @@
+*** Begin Patch
+*** Update File: src/config.ts
+@@
+ export const CONFIG = {
+   port: parseInt(process.env.PORT || "8787", 10),
+   token: process.env.MCP_TOKEN || "changeme",
+   dataDir: process.env.DATA_DIR || "./data",
+   git: {
+-    worktreeRoot: process.env.GIT_WORKTREE_ROOT || process.cwd(),
++    // 既定: プロジェクトルート直下に worktrees/ を掘ってworktreeを作る運用
++    repoRoot: process.env.GIT_REPO_ROOT || process.cwd(),
++    worktreesDir: process.env.GIT_WORKTREES_DIR || "worktrees",
++    worktreeRoot: process.env.GIT_WORKTREE_ROOT || "", // 明示指定があれば優先（任意）
+     branch: process.env.GIT_BRANCH || "unknown",
+     remote: process.env.GIT_REMOTE || "origin",
+     policy: {
+       commitOnWrite: (process.env.GIT_COMMIT_ON_WRITE || "true") === "true",
+       safeGlobs: (process.env.GIT_SAFE_GLOBS || "docs/**,src/**,.github/**").split(","),
+       messageTemplate: process.env.GIT_COMMIT_TEMPLATE || "chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}",
+       signoff: (process.env.GIT_SIGNOFF || "true") === "true",
+-    }
++    },
++    // 追加: 生成を許可するブランチ接頭辞（セキュリティ用 allowlist）
++    allowedBranchPrefixes: (process.env.GIT_ALLOWED_BRANCH_PREFIXES || "feat/,fix/,chore/,refactor/").split(","),
+   }
+ };
+*** End Patch
+
+*** Begin Patch
+*** Update File: src/server.ts
+@@
+-import path from 'path';
+-import fs from 'fs';
++import path from 'path';
++import fs from 'fs';
++import { execSync } from 'child_process';
+@@
+   ws.on('message', (raw) => {
+@@
+       switch (method) {
+@@
+         case 'get_repo_binding': {
+-          return reply({
+-            repoRoot: CONFIG.git.worktreeRoot,
++          // 明示 worktreeRoot が未指定なら repoRoot を返す（旧互換）
++          const root = CONFIG.git.worktreeRoot || CONFIG.git.repoRoot;
++          return reply({
++            repoRoot: root,
+             branch: CONFIG.git.branch,
+             remote: CONFIG.git.remote,
+             policy: CONFIG.git.policy,
+           });
+         }
++        /**
++         * ensure_worktree:
++         * - worktrees/<dirName> に対して <branch> の worktree を作成（なければ）
++         * - 返り値は「その worktree のバインディング」（以後はこの repoRoot を使う）
++         * 例: { branch:"feature/x", dirName:"feature-x" }
++         */
++        case 'ensure_worktree': {
++          const shape = z.object({
++            branch: z.string().min(1).max(120),
++            dirName: z.string().regex(/^[A-Za-z0-9._-]+$/).min(1).max(100),
++            remote: z.string().min(1).default(CONFIG.git.remote),
++          });
++          const input = shape.parse(params);
++
++          // ブランチ許可（prefix allowlist）
++          if (!CONFIG.git.allowedBranchPrefixes.some(p => input.branch.startsWith(p))) {
++            const e:any = new Error(`branch not allowed by prefix policy: ${input.branch}`);
++            e.code = 40301; throw e;
++          }
++
++          const repoRoot = CONFIG.git.repoRoot; // プロジェクトの .git がある側
++          const worktreesDir = path.join(repoRoot, CONFIG.git.worktreesDir);
++          const target = path.join(worktreesDir, input.dirName);
++          fs.mkdirSync(worktreesDir, { recursive: true });
++
++          // 既存判定：.git ファイル or ディレクトリがあれば既存とみなす
++          const exists = fs.existsSync(path.join(target, '.git')) || fs.existsSync(target);
++          if (!exists || fs.readdirSync(target).length === 0) {
++            // 安全のため target は repoRoot 配下であることを確認
++            const rel = path.relative(repoRoot, target);
++            if (rel.startsWith('..') || path.isAbsolute(rel)) {
++              const e:any = new Error('invalid worktree target path'); e.code = 40011; throw e;
++            }
++            // worktree add（ブランチが無ければ作成: -B）
++            // Windows環境も想定し、execSyncの -C オプションで repoRoot を指定
++            try {
++              execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${input.branch}" "${input.remote}/${input.branch}"`, { stdio: 'pipe' });
++            } catch {
++              // remote/<branch> がない場合はローカル新規ブランチで作成
++              execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${input.branch}"`, { stdio: 'pipe' });
++            }
++          }
++          // 返す binding は「このworktreeをroot」とする
++          return reply({
++            repoRoot: target,
++            branch: input.branch,
++            remote: input.remote,
++            policy: CONFIG.git.policy,
++          });
++        }
+@@
+       }
+     } catch (e: any) {
+*** End Patch
+
+*** Begin Patch
+*** Update File: AGENT_BINDING.md
+@@
+-## 提供情報（RPC: `get_repo_binding`）
++## 提供情報（RPC: `get_repo_binding` / `ensure_worktree`）
+ - `repoRoot`: 作業ルート（絶対パス；worktree のルート）
+ - `branch`: 現在のブランチ名（例: `feature/search-bm25`）
+ - `remote`: push 先（例: `origin`）
+ - `policy`:
+@@
+ ## ファイル参照規約
+@@
+ ## コミット規約
+@@
+ ## 最低限のエージェント実装フロー
+-1. `get_repo_binding` を呼んで repo/branch/policy を取得
++1. **worktree未作成の可能性がある場合**は `ensure_worktree({ branch, dirName })` を先に実行  
++   → `repoRoot = <repo>/worktrees/<dirName>` が払い出される  
++   （既に存在していれば再作成せず、そのまま返る）
++2. `get_repo_binding` を呼んで repo/branch/policy を取得（明示worktree未指定なら repoRoot=repoBase）
+ 2. `TODO.md` に記載の参照ファイル（相対 or `repo://`）を `repoRoot` 配下に生成/更新
+ 3. `policy.commitOnWrite` が true なら即コミット（必要に応じて push）
+ 4. すべてのコミットには `{taskIds}`（`TODO.md` の一意ID）を含める
+*** End Patch
+
+*** Begin Patch
+*** Update File: AGENT_PROTOCOL.md
+@@
+ ## Golden Rules
+-1. 起動時に **必ず** `get_repo_binding` を実行して `repoRoot/branch/policy` を取得すること。
++1. worktree が未作成のプロジェクトでは、最初に `ensure_worktree({branch, dirName})` を実行して作業用 worktree を確保すること。
++   - その戻り値の `repoRoot`（= `<repo>/worktrees/<dirName>`）を以後の作業ルートにする。
++2. 起動時に **必ず** `get_repo_binding` を実行して `repoRoot/branch/policy` を取得すること（worktreeが既にある場合）。
+ 2. `TODO.md` からのファイル参照（相対/`repo://`）は **`repoRoot` 基準**で解決すること。
+ 3. ファイル生成・更新後、`policy.commitOnWrite=true` の場合は **同一ブランチ**へ即時コミットすること。
+ 4. コミットメッセージは `messageTemplate` を用い、`{taskIds}` に `TODO.md` のタスクIDを必ず含めること。
+ 5. 変更が無いコミットは禁止。push は任意（CI 連動時は推奨）。
+*** End Patch
+
+*** Begin Patch
+*** Update File: README.md
+@@
+ ## 環境変数（worktree）
+-- `GIT_WORKTREE_ROOT`（必須推奨）
++- `GIT_REPO_ROOT`（プロジェクトの .git 管理側のルート。未指定時は `process.cwd()`）
++- `GIT_WORKTREES_DIR`（既定: `worktrees`）
++- `GIT_WORKTREE_ROOT`（明示worktreeがある場合に直接指定；通常は `ensure_worktree` を使用）
+ - `GIT_BRANCH`（必須推奨）
+ - `GIT_REMOTE=origin`
+@@
+ - `GIT_COMMIT_TEMPLATE="chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}"`
+ - `GIT_SIGNOFF=true`
++- `GIT_ALLOWED_BRANCH_PREFIXES="feat/,fix/,chore/,refactor/"`（worktree作成を許可するブランチ接頭辞）
++
++## 便利RPC
++- `ensure_worktree({ branch, dirName })`  
++  → `<repoRoot>/<worktreesDir>/<dirName>` に worktree を作成（既存なら再利用）し、その worktree を `repoRoot` とするバインディングを返す。
+*** End Patch

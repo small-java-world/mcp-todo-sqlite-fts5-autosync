@@ -3,19 +3,59 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import bonjour from 'bonjour-service';
 import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
 import { ReviewIssuesManager } from './utils/review-issues.js';
+import { CONFIG } from './config.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
 const AUTO_EXPORT_ON_EXIT = (process.env.AUTO_EXPORT_ON_EXIT || '1') === '1';
-const EXPORT_DIR = process.env.EXPORT_DIR || path.join('data','snapshots');
-const SHADOW_PATH = process.env.SHADOW_PATH || path.join('data','shadow','TODO.shadow.md');
 
-const db = new DB('data', 'todo.db', path.join('data','cas'));
+const DATA_DIR = path.resolve(CONFIG.dataDir || 'data');
+const resolveWithinData = (raw: string | undefined, segments: string[]): string => {
+  if (!raw || !raw.trim()) {
+    return path.join(DATA_DIR, ...segments);
+  }
+  return path.isAbsolute(raw) ? raw : path.join(DATA_DIR, raw);
+};
+const DB_FILE = process.env.DB_FILE || 'todo.db';
+const CAS_DIR = resolveWithinData(process.env.CAS_DIR, ['cas']);
+const EXPORT_DIR = resolveWithinData(process.env.EXPORT_DIR, ['snapshots']);
+const SHADOW_PATH = resolveWithinData(process.env.SHADOW_PATH, ['shadow', 'TODO.shadow.md']);
+
+const db = new DB(DATA_DIR, DB_FILE, CAS_DIR);
 const issuesManager = new ReviewIssuesManager(db.db);
+
+function sanitizeDirName(s: string): string {
+  return s.replace(/[^\w.\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'wt';
+}
+
+function ensureWorktreeLocally(branch: string, dirName: string, remote: string) {
+  // ブランチ前置詞の許可チェック
+  if (!CONFIG.git.allowedBranchPrefixes.some(p => branch.startsWith(p))) {
+    const e: any = new Error(`branch not allowed by prefix policy: ${branch}`); e.code = 40301; throw e;
+  }
+  const repoRoot = CONFIG.git.repoRoot;
+  const worktreesDir = path.join(repoRoot, CONFIG.git.worktreesDir);
+  const target = path.join(worktreesDir, dirName);
+  fs.mkdirSync(worktreesDir, { recursive: true });
+  const rel = path.relative(repoRoot, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    const e: any = new Error('invalid worktree target path'); e.code = 40011; throw e;
+  }
+  const hasGit = fs.existsSync(path.join(target, '.git'));
+  if (!hasGit) {
+    try {
+      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}" "${remote}/${branch}"`, { stdio: 'pipe' });
+    } catch {
+      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}"`, { stdio: 'pipe' });
+    }
+  }
+  return target;
+}
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
 
@@ -36,7 +76,7 @@ function err(code: number, message: string, id: number | string | null) { return
 
 function requireAuth(params: any) {
   if (!TOKEN) return;
-  const tok = params?.authToken || params?.session && sessions.get(params.session)?.id; // allow session reuse
+  const tok = params?.authToken || (params?.session && sessions.has(params.session) ? params.session : null); // allow session reuse
   if (!tok) throw Object.assign(new Error('unauthorized'), { code: 401 });
   if (tok !== TOKEN && !sessions.has(tok)) throw Object.assign(new Error('unauthorized'), { code: 401 });
 }
@@ -108,7 +148,7 @@ wss.on('connection', (ws, req) => {
           if (row.archived && !params?.includeArchived) { send(err(404,'not_found', id)); break; }
           // list blobs
           const blobs = db.db.prepare(`SELECT sha256 FROM task_blobs WHERE task_id=?`).all(String(tid)).map((r:any)=>r.sha256);
-          send(ok({ task: row, blobs }, id));
+          send(ok({ ...row, task: row, blobs }, id));
           break;
         }
         case 'search': {
@@ -271,10 +311,11 @@ case 'list_archived': {
         }
         case 'get_issue_responses': {
           requireAuth(params);
-          const { issue_id, include_internal } = params || {};
+          const { issue_id } = params || {};
           if (!issue_id) { send(err(400,'missing_issue_id', id)); break; }
+          const includeInternal = params?.include_internal;
           try {
-            const responses = issuesManager.getIssueResponses(issue_id, include_internal);
+            const responses = issuesManager.getIssueResponses(issue_id, includeInternal ?? true);
             send(ok({ responses }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
@@ -302,8 +343,8 @@ case 'list_archived': {
         case 'exportTodoMd': {
           requireAuth(params);
           try {
-            const result = db.exportTodoMd();
-            send(ok(result, id));
+            const markdown = db.exportTodoMd();
+            send(ok({ content: markdown }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
         }
@@ -315,6 +356,86 @@ case 'list_archived': {
             send(ok({ changes }, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
+        }
+        case 'get_repo_binding': {
+          // 既存worktreeが指定済みならそれを返す
+          let root = CONFIG.git.worktreeRoot;
+          // 未指定の場合は、autoEnsureWorktreeの設定に従い自動生成を試みる
+          if (!root || !fs.existsSync(path.join(root, '.git'))) {
+            if (CONFIG.git.autoEnsureWorktree && CONFIG.git.branch && CONFIG.git.branch !== 'unknown') {
+              const dir = sanitizeDirName(process.env.GIT_WORKTREE_NAME || CONFIG.git.branch);
+              root = ensureWorktreeLocally(CONFIG.git.branch, dir, CONFIG.git.remote);
+            } else {
+              // 自動生成しない運用では repoRoot を返す（※クライアントは ensure_worktree を明示呼び出し）
+              root = CONFIG.git.repoRoot;
+            }
+          }
+          return send(ok({
+            repoRoot: root,
+            branch: CONFIG.git.branch,
+            remote: CONFIG.git.remote,
+            policy: CONFIG.git.policy,
+          }, id));
+        }
+        case 'reserve_ids': {
+          const n = Math.max(1, Math.min(100, (params?.n ?? 1)));
+          const ymd = new Date().toISOString().slice(0,10).replace(/-/g,'');
+          const ids: string[] = [];
+          for (let i=0;i<n;i++){
+            const tail = String((Date.now()%100000)+i).padStart(3,'0');
+            ids.push(`T-${ymd}-${tail}`);
+          }
+          return send(ok({ ids }, id));
+        }
+        case 'patch_todo_section': {
+          const section = params?.section;
+          const base_sha256 = params?.base_sha256 || '';
+          const ops = params?.ops || [];
+          
+          if (!['PLAN','CONTRACT','TEST','TASKS'].includes(section)) {
+            return send(err(400, 'invalid_section', id));
+          }
+          
+          // @ts-ignore
+          global.__TODO_STATE__ = global.__TODO_STATE__ || {
+            vclock: 0,
+            sha256: '',
+            sections: new Map<string,string[]>([['PLAN',[]],['CONTRACT',[]],['TEST',[]],['TASKS',[]]]),
+          };
+          
+          // @ts-ignore
+          const state = global.__TODO_STATE__;
+          if (base_sha256 && base_sha256 !== state.sha256) {
+            return send(err(409, 'conflict', id));
+          }
+          
+          const lines: string[] = (state.sections.get(section) || []).slice();
+          for (const op of ops) {
+            if (op.op === 'replaceLines') {
+              lines.splice(op.start, op.end - op.start, ...op.text.split(/\r?\n/));
+            }
+          }
+          
+          if (section === 'TASKS') {
+            for (const L of lines) {
+              if (!/^(\s{2}){0,2}- \[( |x)\] \[T-[A-Z0-9\-]+\]/.test(L)) {
+                return send(err(400, 'TASKS format error', id));
+              }
+            }
+          }
+          
+          state.sections.set(section, lines);
+          state.vclock += 1;
+          const nextSha = crypto.createHash('sha256').update(
+            ['PLAN','CONTRACT','TEST','TASKS'].map(s => (state.sections.get(s)||[]).join('\n')).join('\n#--\n')
+          ).digest('hex');
+          state.sha256 = nextSha;
+          
+          const now = Date.now();
+          // 変更フィードに記録
+          db.insertChange('todo', section, 'update', state.vclock);
+          
+          return send(ok({ vclock: state.vclock, sha256: nextSha }, id));
         }
         default:
           send(err(-32601,'method_not_found', id));
@@ -342,3 +463,5 @@ process.on('SIGTERM', () => {
   try { if (AUTO_EXPORT_ON_EXIT) performServerSyncExport(); } catch(e) { console.warn('[autosync] failed:', (e as Error).message); }
   process.exit(0);
 });
+
+

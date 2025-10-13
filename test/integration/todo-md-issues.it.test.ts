@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import WebSocket from 'ws';
-import fs from 'fs';
-import path from 'path';
+import { startIntegrationServer, stopIntegrationServer, cleanIntegrationData, type ServerHandle } from './support/server';
 
-const SERVER_URL = 'ws://localhost:8765';
-const AUTH_TOKEN = 'devtoken';
+let serverHandle: ServerHandle;
+let SERVER_URL: string;
+let AUTH_TOKEN: string;
 
 describe('TODO.md Issues Integration Tests', () => {
   let ws: WebSocket;
@@ -12,19 +12,14 @@ describe('TODO.md Issues Integration Tests', () => {
   let messageId = 0;
 
   beforeAll(async () => {
-    // サーバーが起動していることを確認
-    const testWs = new WebSocket(SERVER_URL);
-    await new Promise((resolve, reject) => {
-      testWs.on('open', () => {
-        testWs.close();
-        resolve(true);
-      });
-      testWs.on('error', reject);
-    });
+    serverHandle = await startIntegrationServer();
+    SERVER_URL = `ws://127.0.0.1:${serverHandle.port}`;
+    AUTH_TOKEN = serverHandle.token;
   });
 
   beforeEach(async () => {
     // 新しいWebSocket接続を作成
+    messageId = 0;
     ws = new WebSocket(SERVER_URL);
     
     await new Promise((resolve, reject) => {
@@ -47,13 +42,9 @@ describe('TODO.md Issues Integration Tests', () => {
     }
   });
 
-  afterAll(() => {
-    // テストデータのクリーンアップ
-    try {
-      fs.rmSync('data', { recursive: true, force: true });
-    } catch (e) {
-      // Ignore cleanup errors
-    }
+  afterAll(async () => {
+    await stopIntegrationServer(serverHandle);
+    cleanIntegrationData(serverHandle);
   });
 
   function sendRequest(request: any): Promise<any> {
@@ -101,10 +92,10 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Database queries are too slow
 - **Tags**: performance, database
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: I'll optimize the queries
-- 2025-01-16T11:00:00Z by reviewer1: Please add indexes
-- 2025-01-16T12:00:00Z by developer1 (internal): Working on it
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "I'll optimize the queries"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Please add indexes"
+  - 2025-01-16T12:00:00Z by developer1 (comment): "Working on it" (internal)
 
 #### Issue 2: Code Style
 - **Status**: Resolved
@@ -116,9 +107,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Inconsistent indentation
 - **Tags**: style, formatting
 
-**Responses:**
-- 2025-01-16T09:45:00Z by developer2: Fixed the indentation
-- 2025-01-16T10:30:00Z by reviewer2: Looks good, resolved
+- Responses:
+  - 2025-01-16T09:45:00Z by developer2 (comment): "Fixed the indentation"
+  - 2025-01-16T10:30:00Z by reviewer2 (comment): "Looks good, resolved"
 
 #### Issue 3: Security Vulnerability
 - **Status**: Closed
@@ -131,10 +122,10 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: SQL injection vulnerability found
 - **Tags**: security, critical
 
-**Responses:**
-- 2025-01-16T08:15:00Z by developer3: Investigating the issue
-- 2025-01-16T09:00:00Z by developer3: Fixed with parameterized queries
-- 2025-01-16T09:15:00Z by security-team: Verified fix, closing issue
+- Responses:
+  - 2025-01-16T08:15:00Z by developer3 (comment): "Investigating the issue"
+  - 2025-01-16T09:00:00Z by developer3 (comment): "Fixed with parameterized queries"
+  - 2025-01-16T09:15:00Z by security-team (comment): "Verified fix, closing issue"
 `;
 
       // TODO.mdをインポート
@@ -198,7 +189,8 @@ describe('TODO.md Issues Integration Tests', () => {
         method: 'get_issue_responses',
         params: {
           session: sessionId,
-          issue_id: performanceIssue.id
+          issue_id: performanceIssue.id,
+          include_internal: true
         }
       });
 
@@ -249,9 +241,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Main issue description
 - **Tags**: main, bug
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: Working on it
-- 2025-01-16T11:00:00Z by reviewer1: Please provide more details
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "Working on it"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Please provide more details"
 
 #### Issue 2: Related Issue
 - **Status**: Open
@@ -262,9 +254,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Related enhancement
 - **Tags**: enhancement, related
 
-**Responses:**
-- 2025-01-16T10:30:00Z by developer2: This is a good idea
-- 2025-01-16T11:30:00Z by reviewer2: Let's discuss this further
+- Responses:
+  - 2025-01-16T10:30:00Z by developer2 (comment): "This is a good idea"
+  - 2025-01-16T11:30:00Z by reviewer2 (comment): "Let's discuss this further"
 `;
 
       // TODO.mdをインポート
@@ -295,7 +287,8 @@ describe('TODO.md Issues Integration Tests', () => {
           method: 'get_issue_responses',
           params: {
             session: sessionId,
-            issue_id: issue.id
+            issue_id: issue.id,
+            include_internal: true
           }
         });
 
@@ -334,9 +327,9 @@ describe('TODO.md Issues Integration Tests', () => {
 - **Description**: Issue with special characters: <>&"' and unicode: 日本語
 - **Tags**: special, unicode, symbols
 
-**Responses:**
-- 2025-01-16T10:00:00Z by developer1: Handling special chars: <>&"'
-- 2025-01-16T11:00:00Z by reviewer1: Unicode test: 日本語文字
+- Responses:
+  - 2025-01-16T10:00:00Z by developer1 (comment): "Handling special chars: <>&\"'"
+  - 2025-01-16T11:00:00Z by reviewer1 (comment): "Unicode test: 日本語文字"
 `;
 
       // TODO.mdをインポート
@@ -373,7 +366,8 @@ describe('TODO.md Issues Integration Tests', () => {
         method: 'get_issue_responses',
         params: {
           session: sessionId,
-          issue_id: specialIssue.id
+          issue_id: specialIssue.id,
+          include_internal: true
         }
       });
 

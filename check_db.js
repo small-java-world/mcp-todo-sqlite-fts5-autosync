@@ -1,6 +1,10 @@
 import Database from 'better-sqlite3';
+import path from 'path';
 
-const db = new Database('data/todo.db');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || 'data');
+const DB_FILE = process.env.DB_FILE || 'todo.db';
+const dbPath = path.isAbsolute(DB_FILE) ? DB_FILE : path.join(DATA_DIR, DB_FILE);
+const db = new Database(dbPath);
 
 console.log('=== Tasks Table ===');
 const tasks = db.prepare('SELECT * FROM tasks').all();
