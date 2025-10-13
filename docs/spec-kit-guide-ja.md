@@ -255,6 +255,28 @@ Gradle はホストで実行
   - テスト種別（unit/infra/e2e/front）のランナー/レポート規約を一箇所に定義
   - `tdd.run`/`tdd.captureResults` がこのプロファイルに沿って実行・収集
 
+#### RPCディスパッチのハンドラマップ化（概要）
+
+MCP TODO Server 側の RPC は、メソッド名→ハンドラのマップでディスパッチされます。`src/server.ts` の `coreHandlers` に登録され、拡張（Speckit/TDD/Note/Intent/Projection/UT）は `registerHandler()` でプラグイン追加されます。switch 文の肥大化を避け、保守性と可読性を向上します。
+
+主なマップ化済み RPC（抜粋）:
+
+- タスク: `list_recent`, `get_task`, `upsert_task`, `mark_done`, `attach_blob`
+- TODO.md: `importTodoMd`, `exportTodoMd`
+- 変更フィード: `poll_changes`
+- レビュー指摘: `create_issue`, `get_issue`, `update_issue`, `resolve_issue`, `close_issue`, `add_issue_response`, `get_issue_responses`, `get_issues`, `search_issues`
+- ワークツリー: `get_repo_binding`, `ensure_worktree`
+- その他: `reserve_ids`, `patch_todo_section`, `todo.watch`, `todo.unwatch`
+
+#### ワークツリー（Git worktree）利用例
+
+`get_repo_binding` で `repoRoot` を取得し、`repo://path/to/file` の解決やコミット方針に従った反映を行います。`CONFIG.git.autoEnsureWorktree` が有効な場合は未作成でもサーバ側で安全に作成されます。明示的にワークツリーを確保したい場合は `ensure_worktree` を先に呼びます。
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"ensure_worktree","params":{"authToken":"<MCP_TOKEN>","branch":"feat/awesome","dirName":"feat-awesome"}}
+{"jsonrpc":"2.0","id":2,"method":"get_repo_binding","params":{"authToken":"<MCP_TOKEN>"}}
+```
+
 ---
 
 ## 4) フロントエンド TDD（Next.js + Vitest）

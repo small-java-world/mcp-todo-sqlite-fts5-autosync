@@ -93,8 +93,25 @@ pnpm run cleanup
 { "jsonrpc":"2.0", "id":1, "method":"speckit.run", "params":{ "cmd":"/speckit.tasks", "todo_id":"T-2025-001" } }
 ```
 
+### RPCディスパッチ: ハンドラマップ化
+
+サーバ内部の RPC ディスパッチは大きな switch から、メソッド名→ハンドラ関数のマップに段階移行しました。これにより:
+
+- 追従・追加が容易（`src/server.ts` の `coreHandlers` に登録）
+- Speckit/TDD 等の拡張は `registerHandler()` でプラグイン的に追加
+
+マップ化済みの主な RPC:
+
+- タスク系: `list_recent`, `get_task`, `upsert_task`, `mark_done`, `attach_blob`
+- TODO.md入出力: `importTodoMd`, `exportTodoMd`
+- 変更フィード: `poll_changes`
+- レビュー指摘: `create_issue`, `get_issue`, `update_issue`, `resolve_issue`, `close_issue`, `add_issue_response`, `get_issue_responses`, `get_issues`, `search_issues`
+- リポジトリ/ワークツリー: `get_repo_binding`, `ensure_worktree`
+- 補助: `reserve_ids`, `patch_todo_section`, `todo.watch`, `todo.unwatch`
+
 ### Git Worktree バインディングAPI
-- `get_repo_binding()` → **Git worktree バインディング**（repoRoot/branch/policy）
+- `get_repo_binding()` → **Git worktree バインディング**（repoRoot/branch/policy）。`CONFIG.git.autoEnsureWorktree` 有効時は未作成でもサーバ側で安全に自動作成。
+- `ensure_worktree({ branch, dirName })` → `<repoRoot>/<worktreesDir>/<dirName>` に worktree を安全作成（既存時は再利用）し、その worktree を repoRoot とするバインディングを返却。
 - `reserve_ids({n})` → **TODO用IDの中央採番**（例: `T-YYYYMMDD-###`）
 - `patch_todo_section({section, base_sha256, ops[]})` → **TODO.mdの行パッチ**（3階層＋1行1タスク前提）
 

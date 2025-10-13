@@ -180,6 +180,265 @@ wss.on('connection', (ws, req) => {
       db.db.prepare(`INSERT OR IGNORE INTO task_blobs(task_id, sha256) VALUES (?,?)`).run(String(tid), digest);
       ws.send(stringify(ok({ sha256: digest, ok: true }, id)));
     }],
+    ['importTodoMd', async (params, id) => {
+      requireAuth(params);
+      const { content } = params || {};
+      if (!content) { ws.send(stringify(err(400,'missing_content', id))); return; }
+      try {
+        const result = db.importTodoMd(content);
+        ws.send(stringify(ok(result, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['exportTodoMd', async (_params, id) => {
+      requireAuth(_params);
+      try {
+        const markdown = db.exportTodoMd();
+        ws.send(stringify(ok({ content: markdown }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['poll_changes', async (params, id) => {
+      requireAuth(params);
+      const { since = 0, limit = 200 } = params || {};
+      try {
+        const changes = db.pollChanges(since, limit);
+        ws.send(stringify(ok({ changes }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    // --- review-issues RPCs ---
+    ['create_issue', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { task_id, title, description, priority, category, severity, created_by, review_id, due_date, tags } = params || {};
+        if (!task_id || !title) { ws.send(stringify(err(400,'missing_required_fields', id))); return; }
+        const res = db.issuesManager.createIssue({
+          task_id: String(task_id),
+          review_id: review_id ?? null,
+          title: String(title),
+          description: description ?? undefined,
+          status: 'open',
+          priority: priority ?? 'medium',
+          category: category ?? undefined,
+          severity: severity ?? 'medium',
+          created_by: created_by ?? 'unknown',
+          due_date: due_date ?? undefined,
+          tags: tags ?? undefined,
+          created_at: 0, // filled by manager
+        } as any);
+        ws.send(stringify(ok({ issue_id: res.id, created_at: res.created_at }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['get_issue', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id } = params || {};
+        if (issue_id == null) { ws.send(stringify(err(400,'missing_issue_id', id))); return; }
+        const issue = db.issuesManager.getIssue(Number(issue_id));
+        if (!issue) { ws.send(stringify(err(404,'issue_not_found', id))); return; }
+        ws.send(stringify(ok({ issue }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['update_issue', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id, ...updates } = params || {};
+        if (issue_id == null) { ws.send(stringify(err(400,'missing_issue_id', id))); return; }
+        const res = db.issuesManager.updateIssue(Number(issue_id), updates);
+        ws.send(stringify(ok({ ok: res.ok }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['resolve_issue', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id, resolved_by, resolution_note } = params || {};
+        if (issue_id == null || !resolved_by) { ws.send(stringify(err(400,'missing_required_fields', id))); return; }
+        const res = db.issuesManager.resolveIssue(Number(issue_id), String(resolved_by), resolution_note ?? undefined);
+        ws.send(stringify(ok({ ok: res.ok }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['close_issue', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id, closed_by, close_reason } = params || {};
+        if (issue_id == null || !closed_by) { ws.send(stringify(err(400,'missing_required_fields', id))); return; }
+        const res = db.issuesManager.closeIssue(Number(issue_id), String(closed_by), close_reason ?? undefined);
+        ws.send(stringify(ok({ ok: res.ok }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['add_issue_response', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id, response_type, content, created_by, is_internal = false, attachment_sha256 } = params || {};
+        if (issue_id == null || !response_type || !content) { ws.send(stringify(err(400,'missing_required_fields', id))); return; }
+        const res = db.issuesManager.addResponse({
+          issue_id: Number(issue_id),
+          response_type: String(response_type),
+          content: String(content),
+          created_by: created_by ?? 'unknown',
+          is_internal: Boolean(is_internal),
+          attachment_sha256: attachment_sha256 ?? undefined,
+          created_at: 0,
+        } as any);
+        ws.send(stringify(ok({ response_id: res.id, created_at: res.created_at }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['get_issue_responses', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { issue_id, include_internal = false } = params || {};
+        if (issue_id == null) { ws.send(stringify(err(400,'missing_issue_id', id))); return; }
+        const responses = db.issuesManager.getIssueResponses(Number(issue_id), Boolean(include_internal));
+        ws.send(stringify(ok({ responses }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['get_issues', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { task_id, status, priority, category, created_by, limit, offset } = params || {};
+        if (!task_id) { ws.send(stringify(err(400,'missing_task_id', id))); return; }
+        const issues = db.issuesManager.getIssuesByTask(String(task_id), { status, priority, category, created_by, limit, offset });
+        ws.send(stringify(ok({ issues }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['search_issues', async (params, id) => {
+      requireAuth(params);
+      try {
+        const { q, filters } = params || {};
+        if (!q) { ws.send(stringify(err(400,'missing_query', id))); return; }
+        const issues = db.issuesManager.searchIssues(String(q), filters ?? {});
+        ws.send(stringify(ok({ issues }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    // --- others: get_repo_binding / ensure_worktree / reserve_ids / patch_todo_section / todo.watch / todo.unwatch ---
+    ['get_repo_binding', async (params, id) => {
+      requireAuth(params);
+      // 既存worktreeが指定済みならそれを返す
+      let root = CONFIG.git.worktreeRoot;
+      // 未指定の場合は、autoEnsureWorktreeの設定に従い自動生成を試みる
+      if (!root || !fs.existsSync(path.join(root, '.git'))) {
+        if ((CONFIG as any).git.autoEnsureWorktree && CONFIG.git.branch && CONFIG.git.branch !== 'unknown') {
+          const dir = sanitizeDirName(process.env.GIT_WORKTREE_NAME || CONFIG.git.branch);
+          root = ensureWorktreeLocally(CONFIG.git.branch, dir, CONFIG.git.remote);
+        } else {
+          // 自動生成しない運用では repoRoot を返す（※クライアントは ensure_worktree を明示呼び出し）
+          root = CONFIG.git.repoRoot;
+        }
+      }
+      ws.send(stringify(ok({
+        repoRoot: root,
+        branch: CONFIG.git.branch,
+        remote: CONFIG.git.remote,
+        policy: CONFIG.git.policy,
+      }, id)));
+    }],
+    ['ensure_worktree', async (params, id) => {
+      requireAuth(params);
+      const { branch, dirName } = params || {};
+      if (!branch || !dirName) { ws.send(stringify(err(400,'missing_required_fields', id))); return; }
+      const dir = sanitizeDirName(String(dirName));
+      try {
+        const root = ensureWorktreeLocally(String(branch), dir, CONFIG.git.remote);
+        ws.send(stringify(ok({ repoRoot: root, branch: String(branch), remote: CONFIG.git.remote, policy: CONFIG.git.policy }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['reserve_ids', async (params, id) => {
+      requireAuth(params);
+      const n = Math.max(1, Math.min(100, (params?.n ?? 1)));
+      const ymd = new Date().toISOString().slice(0,10).replace(/-/g,'');
+      const ids: string[] = [];
+      for (let i=0;i<n;i++){
+        const tail = String((Date.now()%100000)+i).padStart(3,'0');
+        ids.push(`T-${ymd}-${tail}`);
+      }
+      ws.send(stringify(ok({ ids }, id)));
+    }],
+    ['patch_todo_section', async (params, id) => {
+      requireAuth(params);
+      const section = params?.section;
+      const base_sha256 = params?.base_sha256 || '';
+      const ops = params?.ops || [];
+      if (!['PLAN','CONTRACT','TEST','TASKS'].includes(section)) {
+        ws.send(stringify(err(400, 'invalid_section', id))); return;
+      }
+      // @ts-ignore
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (global as any).__TODO_STATE__ = (global as any).__TODO_STATE__ || {
+        vclock: 0,
+        sha256: '',
+        sections: new Map<string,string[]>([['PLAN',[]],['CONTRACT',[]],['TEST',[]],['TASKS',[]]]),
+      };
+      // @ts-ignore
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const state = (global as any).__TODO_STATE__;
+      if (base_sha256 && base_sha256 !== state.sha256) {
+        ws.send(stringify(err(409, 'conflict', id))); return;
+      }
+      const lines: string[] = (state.sections.get(section) || []).slice();
+      for (const op of ops) {
+        if (op.op === 'replaceLines') {
+          lines.splice(op.start, op.end - op.start, ...op.text.split(/\r?\n/));
+        }
+      }
+      if (section === 'TASKS') {
+        for (const L of lines) {
+          if (!/^(\s{2}){0,2}- \[( |x)\] \[T-[A-Z0-9\-]+\]/.test(L)) {
+            ws.send(stringify(err(400, 'TASKS format error', id))); return;
+          }
+        }
+      }
+      state.sections.set(section, lines);
+      state.vclock += 1;
+      const nextSha = crypto.createHash('sha256').update(
+        ['PLAN','CONTRACT','TEST','TASKS'].map(s => (state.sections.get(s)||[]).join('\n')).join('\n#--\n')
+      ).digest('hex');
+      state.sha256 = nextSha;
+      db.insertChange('todo', section, 'update', state.vclock);
+      ws.send(stringify(ok({ vclock: state.vclock, sha256: nextSha }, id)));
+    }],
+    ['todo.watch', async (params, id) => {
+      requireAuth(params);
+      const filters = params?.filters;
+      const subscription: WatchSubscription = {
+        ws,
+        filters: filters ? { entity: filters.entity, id: filters.id } : undefined
+      };
+      watchers.add(subscription);
+      connectionWatchers.add(subscription);
+      ws.send(stringify(ok({ ok: true, watching: true }, id)));
+      console.log(`[watch] Client subscribed, total watchers: ${watchers.size}`);
+    }],
+    ['todo.unwatch', async (params, id) => {
+      requireAuth(params);
+      connectionWatchers.forEach(w => watchers.delete(w));
+      connectionWatchers.clear();
+      ws.send(stringify(ok({ ok: true, watching: false }, id)));
+      console.log(`[watch] Client unsubscribed, total watchers: ${watchers.size}`);
+    }],
   ]);
 
   ws.on('message', (buf) => {
