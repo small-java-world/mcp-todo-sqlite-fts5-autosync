@@ -1,0 +1,35 @@
+version: 1
+spec_source:
+  tasks_glob: ".specify/**/tasks.md"
+
+test_kinds:
+  - kind: "e2e"
+    generator: "blueprints/e2e/gwt"
+    out_dir: "tests/e2e"
+    runner: "scripts/run-e2e.sh"
+    reports: { type: "junit-xml", glob: "reports/e2e/**/*.xml" }
+
+  - kind: "unit"
+    generator: "blueprints/unit/basic"
+    out_dir: "tests/unit"
+    runner: "scripts/run-unit.sh"
+    reports: { type: "junit-xml", glob: "reports/unit/**/*.xml" }
+
+  - kind: "infra"
+    generator: "blueprints/infra/repository"
+    out_dir: "tests/infra"
+    runner: "scripts/run-infra.sh"
+    reports: { type: "junit-xml", glob: "reports/infra/**/*.xml" }
+
+  - kind: "front"
+    generator: "blueprints/front/contract"
+    out_dir: "tests/front"
+    runner: "scripts/run-front.sh"
+    reports: { type: "vitest-json", glob: "reports/front/**/*.json" }
+
+switches:
+  require_on_verify: ["e2e","unit"]
+
+conventions:
+  branch_format: "feature/{spec_id}-{story_id}-{kind}"
+  file_naming: "{spec_id}_{story_id}_{ac_index}_{kind}.{ext}"
