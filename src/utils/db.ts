@@ -317,7 +317,7 @@ this.db.exec(`
   }
 
   getTask(id: string): TaskRow | null {
-    const row = this.db.prepare(`SELECT * FROM tasks WHERE id=? AND archived=0`).get(id) as any;
+    const row = this.db.prepare(`SELECT * FROM tasks WHERE id=?`).get(id) as any;
     return row || null;
   }
 
@@ -418,7 +418,7 @@ restoreTask(id: string) {
 }
 
 listArchived(limit=20, offset=0) {
-  return this.db.prepare(`SELECT * FROM tasks WHERE archived=1 ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
+  return this.db.prepare(`SELECT id,title,archived_at,reason FROM archived_tasks ORDER BY archived_at DESC LIMIT ? OFFSET ?`).all(limit, offset);
 }
 
   setState(id: string, to_state: string, by?: string | null, note?: string | null, at?: number) {
@@ -456,7 +456,7 @@ listArchived(limit=20, offset=0) {
       .run(task_id, ts, by, decision, note ?? null);
   if (decision === 'REQUEST_CHANGES') {
       return this.setState(task_id, 'CHANGES_REQUESTED', by, note ?? undefined, ts);
-  } else if (decision === 'APPROVE') {
+  } else if (decision === 'APPROVED') {
       return this.setState(task_id, 'APPROVED', by, note ?? undefined, ts);
   }
   return { ok: true };
@@ -1080,13 +1080,13 @@ listArchived(limit=20, offset=0) {
       this.saveIssue(currentIssue, lastTaskId);
     }
 
-    // Save timeline events if exists (even if empty)
-    if (lastTaskId) {
+    // Save timeline events if exists
+    if (timelineEvents.length > 0 && lastTaskId) {
       this.saveTimelineEvents(lastTaskId, timelineEvents);
     }
 
-    // Save related links if exists (even if empty)
-    if (lastTaskId) {
+    // Save related links if exists
+    if (relatedLinks.length > 0 && lastTaskId) {
       this.saveRelatedLinks(lastTaskId, relatedLinks);
     }
 
