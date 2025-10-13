@@ -62,6 +62,37 @@ pnpm run cleanup
 - `importTodoMd({content}) -> {ok}` - TODO.md形式のインポート
 - `exportTodoMd() -> {content}` - TODO.md形式のエクスポート
 
+### TDD / Spec Kit / TODO分解 拡張API
+- `speckit.run({ cmd:"/speckit.tasks", todo_id?, created_by? }) -> { ok, generated, indexed? }`
+  - `.specify/**/tasks.md` を生成。`todo_id` を渡すと、生成物のパスを `note.put` 相当でDBに索引（kind=`spec_tasks`）
+- `tdd.scaffold({ task_id }) -> { ok, generated[] }`
+- `tdd.run() -> { ok }`
+- `tdd.captureResults() -> { ok, summaries[] }`
+- `tdd.phase.set({ phase: "red|green|refactor|verify" }) -> { ok, phase }`
+- `todo.decompose({ from? }) -> { ok, emits[] }`
+- `todo.materialize({ tasklet_id }) -> { ok, branch }`
+
+### Intent / Note / Projection / UT 要件API
+- `intent.create({ intent_type, todo_id, message?, created_by?, idempotency_key }) -> { ok, intent_id }`
+- `intent.get({ id }) -> { ok, intent }`
+- `intent.list({ todo_id?, status? }) -> { ok, intents }`
+- `intent.complete({ id }) -> { ok }`
+- `note.put({ todo_id, kind, text?|url?, created_by?, idempotency_key }) -> { ok, note_id }`
+- `note.get({ id }) -> { ok, note }`
+- `note.list({ todo_id?, kind? }) -> { ok, notes }`
+- `projection.requirements({ todo_id, specify_dir? }) -> { ok, file }`
+- `projection.testcases({ todo_id, specify_dir? }) -> { ok, file }`
+- `projection.all({ output_dir?, specify_dir? }) -> { ok }`
+- `ut.requirements.submit({ todo_id, raw_markdown?|raw_json?, idempotency_key }) -> { ok, requirements_id }`
+- `ut.requirements.get({ id?|todo_id? }) -> { ok, requirements }`
+- `ut.testcases.submit({ requirements_id, todo_id?, raw_markdown?|raw_json?, idempotency_key }) -> { ok, testcases_id }`
+- `ut.testcases.get({ id?|requirements_id?|todo_id? }) -> { ok, testcases }`
+
+#### 簡易サンプル（WebSocket JSON-RPC）
+```json
+{ "jsonrpc":"2.0", "id":1, "method":"speckit.run", "params":{ "cmd":"/speckit.tasks", "todo_id":"T-2025-001" } }
+```
+
 ### Git Worktree バインディングAPI
 - `get_repo_binding()` → **Git worktree バインディング**（repoRoot/branch/policy）
 - `reserve_ids({n})` → **TODO用IDの中央採番**（例: `T-YYYYMMDD-###`）

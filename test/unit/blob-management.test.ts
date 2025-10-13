@@ -12,12 +12,19 @@ describe('Blob Management Tests', () => {
     db = new DB(tempDir, 'test.db');
   });
 
-  afterEach(() => {
-    db.close();
-    if (fs.existsSync(tempDir)) {
-      fs.rmSync(tempDir, { recursive: true, force: true });
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+afterEach(async () => {
+  db.close();
+  if (fs.existsSync(tempDir)) {
+    try {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    } catch {
+      await sleep(150);
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
     }
-  });
+  }
+});
 
   it('should check if blob exists', () => {
     const sha256 = 'test-sha256-hash';

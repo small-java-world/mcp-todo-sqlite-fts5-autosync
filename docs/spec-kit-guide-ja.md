@@ -230,6 +230,33 @@ Gradle はホストで実行
 
 ---
 
+### 3.5) MCP TODO Server 連携（Spec Kit × TDD 実運用）
+
+本リポの MCP TODO Server（WebSocket JSON-RPC）により、Spec Kit で得た成果物や TDD の位相を一元管理できます。
+
+- エンドポイント例（抜粋）
+  - `speckit.run({ cmd:"/speckit.tasks", todo_id? }) -> { ok, generated, indexed? }`
+    - `.specify/**/tasks.md` を生成。`todo_id` を渡すと、生成物パスを Note(kind=`spec_tasks`) としてDBに索引
+  - `tdd.scaffold({ task_id }) -> { ok, generated[] }`
+  - `tdd.run() -> { ok }`, `tdd.captureResults() -> { ok, summaries[] }`
+  - `tdd.phase.set({ phase: "red|green|refactor|verify" }) -> { ok, phase }`
+  - `todo.decompose({ from? }) -> { ok, emits[] }`, `todo.materialize({ tasklet_id }) -> { ok, branch }`
+  - `intent.create/get/list/complete`, `note.put/get/list`
+  - `projection.requirements/testcases/all`
+  - `ut.requirements.submit/get`, `ut.testcases.submit/get`
+
+- 例（JSON-RPC リクエスト）
+
+```json
+{ "jsonrpc":"2.0", "id":1, "method":"speckit.run", "params":{ "cmd":"/speckit.tasks", "todo_id":"T-2025-001" } }
+```
+
+- `.tdd/profile.yaml`（雛形あり）
+  - テスト種別（unit/infra/e2e/front）のランナー/レポート規約を一箇所に定義
+  - `tdd.run`/`tdd.captureResults` がこのプロファイルに沿って実行・収集
+
+---
+
 ## 4) フロントエンド TDD（Next.js + Vitest）
 
 **Codex CLI** を使って **テスト先行**で回します。

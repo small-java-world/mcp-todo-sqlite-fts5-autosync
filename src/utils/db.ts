@@ -32,6 +32,12 @@ export type TaskRow = {
   meta: string | null;
   vclock: number;
   updated_at: number;
+  spec_id?: string | null;
+  story_id?: string | null;
+  ac_md?: string | null;
+  phase?: string | null;
+  last_test_status?: string | null;
+  worktree_path?: string | null;
 };
 
 export class DB {
@@ -115,6 +121,13 @@ try { this.db.exec(`ALTER TABLE tasks ADD COLUMN archived INTEGER NOT NULL DEFAU
     try { this.db.exec(`ALTER TABLE tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE tasks ADD COLUMN created_at INTEGER;`); } catch (e) { /* ignore if exists */ }
     try { this.db.exec(`ALTER TABLE archived_tasks ADD COLUMN due_at INTEGER;`); } catch (e) { /* ignore if exists */ }
+    // TDD/SpecKit integration columns
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN spec_id TEXT;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN story_id TEXT;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN ac_md TEXT;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN phase TEXT;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN last_test_status TEXT;`); } catch (e) { /* ignore if exists */ }
+    try { this.db.exec(`ALTER TABLE tasks ADD COLUMN worktree_path TEXT;`); } catch (e) { /* ignore if exists */ }
 this.db.exec(`
   CREATE TABLE IF NOT EXISTS archived_tasks (
     id TEXT PRIMARY KEY,
@@ -168,6 +181,71 @@ this.db.exec(`
     body TEXT NOT NULL,
     is_internal BOOLEAN DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS intents (
+    id TEXT PRIMARY KEY,
+    intent_type TEXT NOT NULL,
+    todo_id TEXT NOT NULL,
+    message TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_by TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    idempotency_key TEXT UNIQUE NOT NULL,
+    FOREIGN KEY (todo_id) REFERENCES tasks(id)
+  );
+  CREATE TABLE IF NOT EXISTS ut_requirements (
+    id TEXT PRIMARY KEY,
+    todo_id TEXT NOT NULL,
+    raw_markdown TEXT,
+    raw_json TEXT,
+    canonical_assumptions TEXT,
+    canonical_invariants TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    idempotency_key TEXT UNIQUE NOT NULL,
+    FOREIGN KEY (todo_id) REFERENCES tasks(id)
+  );
+  CREATE TABLE IF NOT EXISTS ut_testcases (
+    id TEXT PRIMARY KEY,
+    requirements_id TEXT NOT NULL,
+    todo_id TEXT NOT NULL,
+    raw_markdown TEXT,
+    raw_json TEXT,
+    canonical_cases TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    idempotency_key TEXT UNIQUE NOT NULL,
+    FOREIGN KEY (requirements_id) REFERENCES ut_requirements(id),
+    FOREIGN KEY (todo_id) REFERENCES tasks(id)
+  );
+  CREATE TABLE IF NOT EXISTS idempotency_log (
+    idempotency_key TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    todo_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT,
+    url TEXT,
+    created_at INTEGER NOT NULL,
+    created_by TEXT,
+    idempotency_key TEXT UNIQUE NOT NULL,
+    FOREIGN KEY (todo_id) REFERENCES tasks(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_intents_todo_id ON intents(todo_id);
+  CREATE INDEX IF NOT EXISTS idx_intents_status ON intents(status);
+  CREATE INDEX IF NOT EXISTS idx_intents_created_at ON intents(created_at);
+  CREATE INDEX IF NOT EXISTS idx_ut_requirements_todo_id ON ut_requirements(todo_id);
+  CREATE INDEX IF NOT EXISTS idx_ut_testcases_requirements_id ON ut_testcases(requirements_id);
+  CREATE INDEX IF NOT EXISTS idx_ut_testcases_todo_id ON ut_testcases(todo_id);
+  CREATE INDEX IF NOT EXISTS idx_idempotency_log_entity ON idempotency_log(entity_type, entity_id);
+  CREATE INDEX IF NOT EXISTS idx_notes_todo_id ON notes(todo_id);
+  CREATE INDEX IF NOT EXISTS idx_notes_kind ON notes(kind);
+  CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes(created_at);
   CREATE TABLE IF NOT EXISTS review_issues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
@@ -247,7 +325,19 @@ this.db.exec(`
     text: string,
     meta?: any | null,
     if_vclock?: number,
-    extra?: { parent_id?: string | null; level?: number; state?: string; assignee?: string | null; due_at?: number | null }
+    extra?: {
+      parent_id?: string | null;
+      level?: number;
+      state?: string;
+      assignee?: string | null;
+      due_at?: number | null;
+      spec_id?: string | null;
+      story_id?: string | null;
+      ac_md?: string | null;
+      phase?: string | null;
+      last_test_status?: string | null;
+      worktree_path?: string | null;
+    }
   ) {
     const now = Date.now();
     const row = this.getTask(id);
@@ -275,9 +365,17 @@ this.db.exec(`
       const due = dueProvided ? extra!.due_at ?? null : row.due_at ?? null;
       const metaJson = metaProvided ? (meta === null ? null : JSON.stringify(meta)) : row.meta;
 
+      // TDD/SpecKit fields
+      const specId = extra?.spec_id ?? row.spec_id ?? null;
+      const storyId = extra?.story_id ?? row.story_id ?? null;
+      const acMd = extra?.ac_md ?? row.ac_md ?? null;
+      const phase = extra?.phase ?? row.phase ?? null;
+      const lastTestStatus = extra?.last_test_status ?? row.last_test_status ?? null;
+      const worktreePath = extra?.worktree_path ?? row.worktree_path ?? null;
+
       this.db
-        .prepare(`UPDATE tasks SET title=?, text=?, meta=?, vclock=?, updated_at=?, parent_id=?, level=?, state=?, assignee=?, due_at=? WHERE id=?`)
-        .run(title, text, metaJson, vclock, now, pid, lvl, st, asg, due, id);
+        .prepare(`UPDATE tasks SET title=?, text=?, meta=?, vclock=?, updated_at=?, parent_id=?, level=?, state=?, assignee=?, due_at=?, spec_id=?, story_id=?, ac_md=?, phase=?, last_test_status=?, worktree_path=? WHERE id=?`)
+        .run(title, text, metaJson, vclock, now, pid, lvl, st, asg, due, specId, storyId, acMd, phase, lastTestStatus, worktreePath, id);
 
       if (st !== row.state) {
         this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at) VALUES (?,?,?,?)`).run(id, row.state, st, now);
@@ -296,14 +394,22 @@ this.db.exec(`
       const due = dueProvided ? extra!.due_at ?? null : null;
       const metaJson = meta === undefined ? null : meta === null ? null : JSON.stringify(meta);
 
+      // TDD/SpecKit fields
+      const specId = extra?.spec_id ?? null;
+      const storyId = extra?.story_id ?? null;
+      const acMd = extra?.ac_md ?? null;
+      const phase = extra?.phase ?? null;
+      const lastTestStatus = extra?.last_test_status ?? null;
+      const worktreePath = extra?.worktree_path ?? null;
+
       this.db
-        .prepare(`INSERT INTO tasks(id,title,text,done,meta,vclock,created_at,updated_at,parent_id,level,state,assignee,due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(id, title, text, 0, metaJson, vclock, now, now, pid, lvl, st, asg, due);
+        .prepare(`INSERT INTO tasks(id,title,text,done,meta,vclock,created_at,updated_at,parent_id,level,state,assignee,due_at,spec_id,story_id,ac_md,phase,last_test_status,worktree_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(id, title, text, 0, metaJson, vclock, now, now, pid, lvl, st, asg, due, specId, storyId, acMd, phase, lastTestStatus, worktreePath);
       this.db.prepare(`INSERT INTO task_state_history(task_id, from_state, to_state, at) VALUES (?,?,?,?)`).run(id, null, st, now);
-      
+
       // 変更フィードに記録
       this.insertChange('task', id, 'insert', vclock);
-      
+
       return vclock;
     }
   }
@@ -1489,6 +1595,477 @@ exportTodoMd(): string {
 
   close() {
     this.db.close();
+  }
+
+  // Idempotency handling
+  checkIdempotency(idempotencyKey: string): { exists: boolean; result?: any } {
+    const row = this.db.prepare(`
+      SELECT entity_type, entity_id, result FROM idempotency_log
+      WHERE idempotency_key = ?
+    `).get(idempotencyKey) as any;
+
+    if (row) {
+      return { exists: true, result: JSON.parse(row.result) };
+    }
+    return { exists: false };
+  }
+
+  recordIdempotency(idempotencyKey: string, entityType: string, entityId: string, result: any) {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT OR IGNORE INTO idempotency_log (idempotency_key, entity_type, entity_id, result, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(idempotencyKey, entityType, entityId, JSON.stringify(result), now);
+  }
+
+  // Intent methods
+  createIntent(params: {
+    id: string;
+    intent_type: string;
+    todo_id: string;
+    message?: string;
+    created_by?: string;
+    idempotency_key: string;
+  }): { ok: boolean; intent_id?: string; error?: string } {
+    // Check idempotency
+    const idem = this.checkIdempotency(params.idempotency_key);
+    if (idem.exists) {
+      return idem.result;
+    }
+
+    // Validate todo exists
+    const task = this.getTask(params.todo_id);
+    if (!task) {
+      const error = { ok: false, error: 'todo_not_found' };
+      this.recordIdempotency(params.idempotency_key, 'intent', params.id, error);
+      return error;
+    }
+
+    const now = Date.now();
+    try {
+      this.db.prepare(`
+        INSERT INTO intents (id, intent_type, todo_id, message, status, created_by, created_at, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        params.id,
+        params.intent_type,
+        params.todo_id,
+        params.message || null,
+        'pending',
+        params.created_by || null,
+        now,
+        params.idempotency_key
+      );
+
+      this.insertChange('intent', params.id, 'insert');
+
+      const result = { ok: true, intent_id: params.id };
+      this.recordIdempotency(params.idempotency_key, 'intent', params.id, result);
+      return result;
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        // Duplicate idempotency_key - return the existing result
+        const existing = this.checkIdempotency(params.idempotency_key);
+        if (existing.exists) {
+          return existing.result;
+        }
+      }
+      throw error;
+    }
+  }
+
+  getIntent(id: string) {
+    return this.db.prepare(`SELECT * FROM intents WHERE id = ?`).get(id) as any;
+  }
+
+  listIntents(todoId?: string, status?: string) {
+    if (todoId && status) {
+      return this.db.prepare(`SELECT * FROM intents WHERE todo_id = ? AND status = ? ORDER BY created_at DESC`).all(todoId, status);
+    } else if (todoId) {
+      return this.db.prepare(`SELECT * FROM intents WHERE todo_id = ? ORDER BY created_at DESC`).all(todoId);
+    } else if (status) {
+      return this.db.prepare(`SELECT * FROM intents WHERE status = ? ORDER BY created_at DESC`).all(status);
+    } else {
+      return this.db.prepare(`SELECT * FROM intents ORDER BY created_at DESC`).all();
+    }
+  }
+
+  completeIntent(id: string) {
+    const now = Date.now();
+    this.db.prepare(`UPDATE intents SET status = 'completed', completed_at = ? WHERE id = ?`).run(now, id);
+    this.insertChange('intent', id, 'update');
+    return { ok: true };
+  }
+
+  // UT Requirements methods
+  submitRequirements(params: {
+    id: string;
+    todo_id: string;
+    raw_markdown?: string;
+    raw_json?: string;
+    idempotency_key: string;
+  }): { ok: boolean; requirements_id?: string; error?: string } {
+    // Check idempotency
+    const idem = this.checkIdempotency(params.idempotency_key);
+    if (idem.exists) {
+      return idem.result;
+    }
+
+    // Validate todo exists
+    const task = this.getTask(params.todo_id);
+    if (!task) {
+      const error = { ok: false, error: 'todo_not_found' };
+      this.recordIdempotency(params.idempotency_key, 'ut_requirements', params.id, error);
+      return error;
+    }
+
+    const now = Date.now();
+    try {
+      // Check if requirements already exist for this todo
+      const existing = this.db.prepare(`SELECT id FROM ut_requirements WHERE todo_id = ?`).get(params.todo_id) as any;
+
+      if (existing) {
+        // Update existing requirements
+        this.db.prepare(`
+          UPDATE ut_requirements
+          SET raw_markdown = ?, raw_json = ?, updated_at = ?, idempotency_key = ?
+          WHERE id = ?
+        `).run(
+          params.raw_markdown || null,
+          params.raw_json || null,
+          now,
+          params.idempotency_key,
+          existing.id
+        );
+
+        this.insertChange('ut_requirements', existing.id, 'update');
+
+        const result = { ok: true, requirements_id: existing.id };
+        this.recordIdempotency(params.idempotency_key, 'ut_requirements', existing.id, result);
+        return result;
+      } else {
+        // Insert new requirements
+        this.db.prepare(`
+          INSERT INTO ut_requirements (id, todo_id, raw_markdown, raw_json, created_at, updated_at, idempotency_key)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          params.id,
+          params.todo_id,
+          params.raw_markdown || null,
+          params.raw_json || null,
+          now,
+          now,
+          params.idempotency_key
+        );
+
+        this.insertChange('ut_requirements', params.id, 'insert');
+
+        const result = { ok: true, requirements_id: params.id };
+        this.recordIdempotency(params.idempotency_key, 'ut_requirements', params.id, result);
+        return result;
+      }
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        // Duplicate idempotency_key - return the existing result
+        const existing = this.checkIdempotency(params.idempotency_key);
+        if (existing.exists) {
+          return existing.result;
+        }
+      }
+      throw error;
+    }
+  }
+
+  getRequirements(id: string) {
+    return this.db.prepare(`SELECT * FROM ut_requirements WHERE id = ?`).get(id) as any;
+  }
+
+  getRequirementsByTodoId(todoId: string) {
+    return this.db.prepare(`SELECT * FROM ut_requirements WHERE todo_id = ?`).get(todoId) as any;
+  }
+
+  // UT TestCases methods
+  submitTestCases(params: {
+    id: string;
+    requirements_id: string;
+    todo_id: string;
+    raw_markdown?: string;
+    raw_json?: string;
+    idempotency_key: string;
+  }): { ok: boolean; testcases_id?: string; error?: string } {
+    // Check idempotency
+    const idem = this.checkIdempotency(params.idempotency_key);
+    if (idem.exists) {
+      return idem.result;
+    }
+
+    // Validate requirements exist
+    const requirements = this.getRequirements(params.requirements_id);
+    if (!requirements) {
+      const error = { ok: false, error: 'requirements_not_found' };
+      this.recordIdempotency(params.idempotency_key, 'ut_testcases', params.id, error);
+      return error;
+    }
+
+    // Validate todo exists
+    const task = this.getTask(params.todo_id);
+    if (!task) {
+      const error = { ok: false, error: 'todo_not_found' };
+      this.recordIdempotency(params.idempotency_key, 'ut_testcases', params.id, error);
+      return error;
+    }
+
+    const now = Date.now();
+    try {
+      // Check if testcases already exist for this requirements
+      const existing = this.db.prepare(`SELECT id FROM ut_testcases WHERE requirements_id = ?`).get(params.requirements_id) as any;
+
+      if (existing) {
+        // Update existing testcases
+        this.db.prepare(`
+          UPDATE ut_testcases
+          SET raw_markdown = ?, raw_json = ?, updated_at = ?, idempotency_key = ?
+          WHERE id = ?
+        `).run(
+          params.raw_markdown || null,
+          params.raw_json || null,
+          now,
+          params.idempotency_key,
+          existing.id
+        );
+
+        this.insertChange('ut_testcases', existing.id, 'update');
+
+        const result = { ok: true, testcases_id: existing.id };
+        this.recordIdempotency(params.idempotency_key, 'ut_testcases', existing.id, result);
+        return result;
+      } else {
+        // Insert new testcases
+        this.db.prepare(`
+          INSERT INTO ut_testcases (id, requirements_id, todo_id, raw_markdown, raw_json, created_at, updated_at, idempotency_key)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          params.id,
+          params.requirements_id,
+          params.todo_id,
+          params.raw_markdown || null,
+          params.raw_json || null,
+          now,
+          now,
+          params.idempotency_key
+        );
+
+        this.insertChange('ut_testcases', params.id, 'insert');
+
+        const result = { ok: true, testcases_id: params.id };
+        this.recordIdempotency(params.idempotency_key, 'ut_testcases', params.id, result);
+        return result;
+      }
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        // Duplicate idempotency_key - return the existing result
+        const existing = this.checkIdempotency(params.idempotency_key);
+        if (existing.exists) {
+          return existing.result;
+        }
+      }
+      throw error;
+    }
+  }
+
+  getTestCases(id: string) {
+    return this.db.prepare(`SELECT * FROM ut_testcases WHERE id = ?`).get(id) as any;
+  }
+
+  getTestCasesByRequirementsId(requirementsId: string) {
+    return this.db.prepare(`SELECT * FROM ut_testcases WHERE requirements_id = ?`).get(requirementsId) as any;
+  }
+
+  getTestCasesByTodoId(todoId: string) {
+    return this.db.prepare(`SELECT * FROM ut_testcases WHERE todo_id = ?`).all(todoId);
+  }
+
+  // Notes methods
+  putNote(params: {
+    id: string;
+    todo_id: string;
+    kind: string;
+    text?: string;
+    url?: string;
+    created_by?: string;
+    idempotency_key: string;
+  }): { ok: boolean; note_id?: string; error?: string } {
+    // Check idempotency
+    const idem = this.checkIdempotency(params.idempotency_key);
+    if (idem.exists) {
+      return idem.result;
+    }
+
+    // Validate todo exists
+    const task = this.getTask(params.todo_id);
+    if (!task) {
+      const error = { ok: false, error: 'todo_not_found' };
+      this.recordIdempotency(params.idempotency_key, 'note', params.id, error);
+      return error;
+    }
+
+    // Validate that at least one of text or url is provided
+    if (!params.text && !params.url) {
+      const error = { ok: false, error: 'either text or url is required' };
+      this.recordIdempotency(params.idempotency_key, 'note', params.id, error);
+      return error;
+    }
+
+    const now = Date.now();
+    try {
+      this.db.prepare(`
+        INSERT INTO notes (id, todo_id, kind, text, url, created_at, created_by, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        params.id,
+        params.todo_id,
+        params.kind,
+        params.text || null,
+        params.url || null,
+        now,
+        params.created_by || null,
+        params.idempotency_key
+      );
+
+      this.insertChange('note', params.id, 'insert');
+
+      const result = { ok: true, note_id: params.id };
+      this.recordIdempotency(params.idempotency_key, 'note', params.id, result);
+      return result;
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        // Duplicate idempotency_key - return the existing result
+        const existing = this.checkIdempotency(params.idempotency_key);
+        if (existing.exists) {
+          return existing.result;
+        }
+      }
+      throw error;
+    }
+  }
+
+  getNote(id: string) {
+    return this.db.prepare(`SELECT * FROM notes WHERE id = ?`).get(id) as any;
+  }
+
+  listNotes(todoId?: string, kind?: string) {
+    if (todoId && kind) {
+      return this.db.prepare(`SELECT * FROM notes WHERE todo_id = ? AND kind = ? ORDER BY created_at DESC`).all(todoId, kind);
+    } else if (todoId) {
+      return this.db.prepare(`SELECT * FROM notes WHERE todo_id = ? ORDER BY created_at DESC`).all(todoId);
+    } else if (kind) {
+      return this.db.prepare(`SELECT * FROM notes WHERE kind = ? ORDER BY created_at DESC`).all(kind);
+    } else {
+      return this.db.prepare(`SELECT * FROM notes ORDER BY created_at DESC`).all();
+    }
+  }
+
+  // Projection methods - DB → filesystem
+  /**
+   * Project requirements to .specify/requirements/{todo_id}.md
+   */
+  projectRequirements(todoId: string, specifyDir: string): { ok: boolean; file?: string; error?: string } {
+    const requirements = this.getRequirementsByTodoId(todoId);
+    if (!requirements) {
+      return { ok: false, error: 'requirements_not_found' };
+    }
+
+    const requirementsDir = path.join(specifyDir, 'requirements');
+    fs.mkdirSync(requirementsDir, { recursive: true });
+
+    const filename = `${todoId}.md`;
+    const filepath = path.join(requirementsDir, filename);
+
+    const content = requirements.raw_markdown ||
+                   (requirements.raw_json ? `\`\`\`json\n${requirements.raw_json}\n\`\`\`` : '');
+
+    try {
+      fs.writeFileSync(filepath, content, 'utf-8');
+      return { ok: true, file: filepath };
+    } catch (error: any) {
+      return { ok: false, error: error.message };
+    }
+  }
+
+  /**
+   * Project testcases to .specify/testcases/{todo_id}.md
+   */
+  projectTestCases(todoId: string, specifyDir: string): { ok: boolean; file?: string; error?: string } {
+    const testcases = this.getTestCasesByTodoId(todoId);
+    if (!testcases || testcases.length === 0) {
+      return { ok: false, error: 'testcases_not_found' };
+    }
+
+    const testcasesDir = path.join(specifyDir, 'testcases');
+    fs.mkdirSync(testcasesDir, { recursive: true });
+
+    const filename = `${todoId}.md`;
+    const filepath = path.join(testcasesDir, filename);
+
+    // Use the first testcase (there should be only one per todo_id based on current schema)
+    const tc = testcases[0] as any;
+    const content = tc.raw_markdown ||
+                   (tc.raw_json ? `\`\`\`json\n${tc.raw_json}\n\`\`\`` : '');
+
+    try {
+      fs.writeFileSync(filepath, content, 'utf-8');
+      return { ok: true, file: filepath };
+    } catch (error: any) {
+      return { ok: false, error: error.message };
+    }
+  }
+
+  /**
+   * Project all data to filesystem (TODO.md + .specify/**)
+   * This is a two-phase commit safe projection
+   */
+  projectAll(outputDir: string, specifyDir: string): {
+    ok: boolean;
+    todo_md?: string;
+    requirements?: string[];
+    testcases?: string[];
+    error?: string
+  } {
+    try {
+      // Phase 1: Export TODO.md
+      const todoMd = this.exportTodoMd();
+      const todoMdPath = path.join(outputDir, 'TODO.md');
+      fs.writeFileSync(todoMdPath, todoMd, 'utf-8');
+
+      // Phase 2: Project all requirements
+      const allRequirements = this.db.prepare(`SELECT DISTINCT todo_id FROM ut_requirements`).all() as any[];
+      const requirementFiles: string[] = [];
+      for (const r of allRequirements) {
+        const result = this.projectRequirements(r.todo_id, specifyDir);
+        if (result.ok && result.file) {
+          requirementFiles.push(result.file);
+        }
+      }
+
+      // Phase 3: Project all testcases
+      const allTestCases = this.db.prepare(`SELECT DISTINCT todo_id FROM ut_testcases`).all() as any[];
+      const testcaseFiles: string[] = [];
+      for (const tc of allTestCases) {
+        const result = this.projectTestCases(tc.todo_id, specifyDir);
+        if (result.ok && result.file) {
+          testcaseFiles.push(result.file);
+        }
+      }
+
+      return {
+        ok: true,
+        todo_md: todoMdPath,
+        requirements: requirementFiles,
+        testcases: testcaseFiles
+      };
+    } catch (error: any) {
+      return { ok: false, error: error.message };
+    }
   }
 }
 

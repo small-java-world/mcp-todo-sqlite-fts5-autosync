@@ -3,7 +3,6 @@ import { WebSocketServer } from 'ws';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 import bonjour from 'bonjour-service';
 import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
@@ -12,6 +11,12 @@ import { CONFIG } from './config.js';
 import { registerSpeckitBridge } from './mcp/speckit.js';
 import { registerTddTools } from './mcp/tdd.js';
 import { registerTodoSplitter } from './mcp/todo_splitter.js';
+import { registerIntentHandlers } from './mcp/intent.js';
+import { registerUtHandlers } from './mcp/ut.js';
+import { registerNoteHandlers } from './mcp/note.js';
+import { registerProjectionHandlers } from './mcp/projection.js';
+import { sanitizeDirName, ensureWorktreeLocally } from './server/utils.js';
+import { watchers, broadcastChange, type WatchSubscription } from './server/watch.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
@@ -31,34 +36,6 @@ const SHADOW_PATH = resolveWithinData(process.env.SHADOW_PATH, ['shadow', 'TODO.
 
 const db = new DB(DATA_DIR, DB_FILE, CAS_DIR);
 const issuesManager = new ReviewIssuesManager(db.db);
-
-function sanitizeDirName(s: string): string {
-  return s.replace(/[^\w.\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'wt';
-}
-
-function ensureWorktreeLocally(branch: string, dirName: string, remote: string) {
-  // ブランチ前置詞の許可チェック
-  if (!CONFIG.git.allowedBranchPrefixes.some(p => branch.startsWith(p))) {
-    const e: any = new Error(`branch not allowed by prefix policy: ${branch}`); e.code = 40301; throw e;
-  }
-  const repoRoot = CONFIG.git.repoRoot;
-  const worktreesDir = path.join(repoRoot, CONFIG.git.worktreesDir);
-  const target = path.join(worktreesDir, dirName);
-  fs.mkdirSync(worktreesDir, { recursive: true });
-  const rel = path.relative(repoRoot, target);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    const e: any = new Error('invalid worktree target path'); e.code = 40011; throw e;
-  }
-  const hasGit = fs.existsSync(path.join(target, '.git'));
-  if (!hasGit) {
-    try {
-      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}" "${remote}/${branch}"`, { stdio: 'pipe' });
-    } catch {
-      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}"`, { stdio: 'pipe' });
-    }
-  }
-  return target;
-}
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
 
@@ -68,9 +45,13 @@ const registerHandler = (method: string, handler: (params: any, ctx?: any) => Pr
   additionalHandlers.set(method, handler);
 };
 
-registerSpeckitBridge(registerHandler);
-registerTddTools(registerHandler);
+registerSpeckitBridge(registerHandler, db);
+registerTddTools(registerHandler, db);
 registerTodoSplitter(registerHandler);
+registerIntentHandlers(registerHandler, db);
+registerUtHandlers(registerHandler, db);
+registerNoteHandlers(registerHandler, db);
+registerProjectionHandlers(registerHandler, db);
 
 // mDNS advertise (optional)
 try {
@@ -84,8 +65,13 @@ try {
 type Session = { id: string, worker_id: string, ts: number };
 const sessions = new Map<string, Session>();
 
+// watchers moved to ./server/watch
+
 function ok(res: any, id: number | string) { return { jsonrpc: '2.0', id, result: res }; }
 function err(code: number, message: string, id: number | string | null) { return { jsonrpc: '2.0', id, error: { code, message } }; }
+
+// Broadcast change events to watchers
+// broadcastChange moved to ./server/watch
 
 function requireAuth(params: any) {
   if (!TOKEN) return;
@@ -119,6 +105,10 @@ function performServerSyncExport(): { shadow: string, snapshot: string } {
 const wss = new WebSocketServer({ host: '0.0.0.0', port: PORT });
 wss.on('connection', (ws, req) => {
   console.log('[ws] client connected from', req.socket.remoteAddress);
+
+  // Track watchers for this connection
+  const connectionWatchers = new Set<WatchSubscription>();
+
   ws.on('message', (buf) => {
     let msg: any;
     try { msg = JSON.parse(buf.toString()); }
@@ -145,6 +135,8 @@ wss.on('connection', (ws, req) => {
           if (!tid || !title || !text) { send(err(400,'missing_fields', id)); break; }
           try {
             const vclock = db.upsertTask(String(tid), String(title), String(text), metaArg, typeof if_vclock==='number' ? if_vclock : undefined);
+            const task = db.getTask(String(tid));
+            broadcastChange('task', String(tid), 'upsert', task);
             send(ok({ vclock }, id));
           } catch (e: any) {
             if (e.code === 409) send(err(409, 'vclock_conflict', id));
@@ -180,6 +172,8 @@ wss.on('connection', (ws, req) => {
           if (typeof done !== 'boolean' || !tid) { send(err(400,'missing_fields', id)); break; }
           try {
             const vclock = db.markDone(String(tid), !!done, typeof if_vclock==='number'?if_vclock:undefined);
+            const task = db.getTask(String(tid));
+            broadcastChange('task', String(tid), 'mark_done', task);
             send(ok({ vclock }, id));
           } catch (e: any) {
             if (e.code === 404) send(err(404,'not_found', id));
@@ -225,7 +219,11 @@ case 'archive_task': {
   requireAuth(params);
   const { id: tid, reason } = params || {};
   if (!tid) { send(err(400,'missing_id', id)); break; }
-  try { send(ok(db.archiveTask(String(tid), reason), id)); }
+  try {
+    const result = db.archiveTask(String(tid), reason);
+    broadcastChange('task', String(tid), 'archive', { archived: true, reason });
+    send(ok(result, id));
+  }
   catch (e: any) { send(err(e.code||500, e.message||'error', id)); }
   break;
 }
@@ -233,7 +231,12 @@ case 'restore_task': {
   requireAuth(params);
   const { id: tid } = params || {};
   if (!tid) { send(err(400,'missing_id', id)); break; }
-  try { send(ok(db.restoreTask(String(tid)), id)); }
+  try {
+    const result = db.restoreTask(String(tid));
+    const task = db.getTask(String(tid));
+    broadcastChange('task', String(tid), 'restore', task);
+    send(ok(result, id));
+  }
   catch (e: any) { send(err(e.code||500, e.message||'error', id)); }
   break;
 }
@@ -370,6 +373,31 @@ case 'list_archived': {
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
         }
+        case 'todo.watch': {
+          requireAuth(params);
+          const filters = params?.filters;
+          const subscription: WatchSubscription = {
+            ws,
+            filters: filters ? {
+              entity: filters.entity,
+              id: filters.id
+            } : undefined
+          };
+          watchers.add(subscription);
+          connectionWatchers.add(subscription);
+          send(ok({ ok: true, watching: true }, id));
+          console.log(`[watch] Client subscribed, total watchers: ${watchers.size}`);
+          break;
+        }
+        case 'todo.unwatch': {
+          requireAuth(params);
+          // Remove all watchers for this connection
+          connectionWatchers.forEach(w => watchers.delete(w));
+          connectionWatchers.clear();
+          send(ok({ ok: true, watching: false }, id));
+          console.log(`[watch] Client unsubscribed, total watchers: ${watchers.size}`);
+          break;
+        }
         case 'get_repo_binding': {
           // 既存worktreeが指定済みならそれを返す
           let root = CONFIG.git.worktreeRoot;
@@ -454,7 +482,10 @@ case 'list_archived': {
           // Check for additional handlers registered by plugins
           if (additionalHandlers.has(method)) {
             const handler = additionalHandlers.get(method)!;
-            const ctx = { log: console.log };
+            const ctx = {
+              log: console.log,
+              broadcast: broadcastChange
+            };
             handler(params, ctx).then(result => send(ok(result, id)))
               .catch((e: any) => send(err(e.code || 500, e.message || 'error', id)));
           } else {
@@ -467,6 +498,10 @@ case 'list_archived': {
     }
   });
   ws.on('close', () => {
+    // Remove all watchers for this connection
+    connectionWatchers.forEach(w => watchers.delete(w));
+    connectionWatchers.clear();
+    console.log(`[watch] Client disconnected, total watchers: ${watchers.size}`);
     // sessions are ephemeral; if needed, implement cleanup
   });
 });

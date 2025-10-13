@@ -52,12 +52,18 @@ describe('Archive/Restore Tests', () => {
     db.importTodoMd(todoMd);
   });
 
-  afterEach(async () => {
-    db.close();
-    if (fs.existsSync(tempDir)) {
+afterEach(async () => {
+  db.close();
+  // Windowsのファイルロックに備えて少し待機しつつリトライ
+  if (fs.existsSync(tempDir)) {
+    try {
+      await removeTempDir(tempDir);
+    } catch {
+      await sleep(150);
       await removeTempDir(tempDir);
     }
-  });
+  }
+});
 
   it('should archive a task', () => {
     const taskId = 'T-ARCHIVE-1';

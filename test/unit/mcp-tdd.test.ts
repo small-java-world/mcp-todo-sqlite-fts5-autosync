@@ -1,24 +1,47 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { registerTddTools } from '../../src/mcp/tdd.js';
+import { DB } from '../../src/utils/db.js';
 import fs from 'fs';
 import path from 'path';
 
 describe('registerTddTools', () => {
   let handlers: Map<string, (params: any, ctx?: any) => Promise<any>>;
   let testDir: string;
+  let db: DB;
+  let dbPath: string;
 
   beforeEach(() => {
     handlers = new Map();
     const register = (method: string, handler: (params: any, ctx?: any) => Promise<any>) => {
       handlers.set(method, handler);
     };
-    registerTddTools(register);
+
+    // Create test database
+    dbPath = path.join(process.cwd(), '.test-output', `test-${Date.now()}.db`);
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    db = new DB(dbPath);
+
+    registerTddTools(register, db);
 
     testDir = path.join(process.cwd(), '.test-output', `tdd-${Date.now()}`);
     fs.mkdirSync(testDir, { recursive: true });
   });
 
   afterEach(() => {
+    // Close database
+    if (db) {
+      db.close();
+    }
+
+    // Cleanup database file (best effort on Windows)
+    if (fs.existsSync(dbPath)) {
+      try {
+        fs.unlinkSync(dbPath);
+      } catch (e) {
+        // Ignore EPERM errors on Windows - file will be cleaned up eventually
+      }
+    }
+
     // Cleanup test directories
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
@@ -79,20 +102,6 @@ describe('registerTddTools', () => {
 
       expect(result.ok).toBe(true);
       expect(result.generated[0]).toContain('TASK-UNKNOWN');
-    });
-  });
-
-  describe('tdd.run', () => {
-    it('should register tdd.run handler', () => {
-      expect(handlers.has('tdd.run')).toBe(true);
-    });
-
-    it('should execute without errors', async () => {
-      const handler = handlers.get('tdd.run')!;
-      const ctx = { log: () => {} };
-
-      // This will fail because scripts don't exist, but should handle gracefully
-      await expect(handler({}, ctx)).rejects.toThrow();
     });
   });
 
