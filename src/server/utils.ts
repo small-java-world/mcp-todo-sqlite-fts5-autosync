@@ -1,33 +1,43 @@
-import fs from 'fs';
-import path from 'path';
+/**
+ * Server utility functions
+ */
 import { execSync } from 'child_process';
-import { CONFIG } from '../config.js';
+import path from 'path';
+import fs from 'fs';
 
-export function sanitizeDirName(s: string): string {
-  return s.replace(/[^\w.\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'wt';
+/**
+ * Sanitize directory name for worktree
+ */
+export function sanitizeDirName(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
-export function ensureWorktreeLocally(branch: string, dirName: string, remote: string) {
-  if (!CONFIG.git.allowedBranchPrefixes.some(p => branch.startsWith(p))) {
-    const e: any = new Error(`branch not allowed by prefix policy: ${branch}`); e.code = 40301; throw e;
+/**
+ * Ensure git worktree exists locally
+ */
+export function ensureWorktreeLocally(branch: string, dirName: string, remote?: string): string {
+  const worktreeDir = path.resolve('.worktrees', dirName);
+
+  if (fs.existsSync(path.join(worktreeDir, '.git'))) {
+    return worktreeDir;
   }
-  const repoRoot = CONFIG.git.repoRoot;
-  const worktreesDir = path.join(repoRoot, CONFIG.git.worktreesDir);
-  const target = path.join(worktreesDir, dirName);
-  fs.mkdirSync(worktreesDir, { recursive: true });
-  const rel = path.relative(repoRoot, target);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    const e: any = new Error('invalid worktree target path'); e.code = 40011; throw e;
-  }
-  const hasGit = fs.existsSync(path.join(target, '.git'));
-  if (!hasGit) {
-    try {
-      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}" "${remote}/${branch}"`, { stdio: 'pipe' });
-    } catch {
-      execSync(`git -C "${repoRoot}" worktree add "${target}" -B "${branch}"`, { stdio: 'pipe' });
+
+  fs.mkdirSync(path.dirname(worktreeDir), { recursive: true });
+
+  try {
+    // Create worktree
+    if (remote) {
+      execSync(`git worktree add -b ${branch} ${worktreeDir} ${remote}/${branch}`, {
+        stdio: 'inherit'
+      });
+    } else {
+      execSync(`git worktree add ${worktreeDir} ${branch}`, {
+        stdio: 'inherit'
+      });
     }
+  } catch (error) {
+    throw new Error(`Failed to create worktree: ${(error as Error).message}`);
   }
-  return target;
+
+  return worktreeDir;
 }
-
-

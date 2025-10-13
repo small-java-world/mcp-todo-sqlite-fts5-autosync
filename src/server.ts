@@ -17,6 +17,7 @@ import { registerNoteHandlers } from './mcp/note.js';
 import { registerProjectionHandlers } from './mcp/projection.js';
 import { sanitizeDirName, ensureWorktreeLocally } from './server/utils.js';
 import { watchers, broadcastChange, type WatchSubscription } from './server/watch.js';
+import { GitSyncWorker } from './server/git-sync-worker.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
@@ -33,11 +34,50 @@ const DB_FILE = process.env.DB_FILE || 'todo.db';
 const CAS_DIR = resolveWithinData(process.env.CAS_DIR, ['cas']);
 const EXPORT_DIR = resolveWithinData(process.env.EXPORT_DIR, ['snapshots']);
 const SHADOW_PATH = resolveWithinData(process.env.SHADOW_PATH, ['shadow', 'TODO.shadow.md']);
+const resolveRepoRoot = CONFIG.git.worktreeRoot || CONFIG.git.repoRoot || process.cwd();
+const REPO_ROOT = path.resolve(resolveRepoRoot);
+const SPECIFY_DIR = path.join(REPO_ROOT, '.specify');
+const parseIntEnv = (value: string | undefined, fallback: number) => {
+  const parsed = value !== undefined ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isNaN(parsed) ? fallback : parsed;
+};
+const GIT_SYNC_ENABLED = (process.env.GIT_SYNC_ENABLED ?? '0') !== '0';
+const GIT_SYNC_DEBOUNCE_MS = parseIntEnv(process.env.GIT_SYNC_DEBOUNCE_MS, 5000);
+const GIT_SYNC_POLL_INTERVAL_MS = parseIntEnv(process.env.GIT_SYNC_POLL_INTERVAL_MS, 2000);
+const GIT_AUTO_PUSH = (process.env.GIT_AUTO_PUSH ?? 'false').toLowerCase() === 'true';
 
 const db = new DB(DATA_DIR, DB_FILE, CAS_DIR);
 const issuesManager = new ReviewIssuesManager(db.db);
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
+fs.mkdirSync(SPECIFY_DIR, { recursive: true });
+
+
+let gitSyncWorker: GitSyncWorker | null = null;
+if (GIT_SYNC_ENABLED) {
+  gitSyncWorker = new GitSyncWorker({
+    db,
+    shadowPath: SHADOW_PATH,
+    repoRoot: REPO_ROOT,
+    specifyDir: SPECIFY_DIR,
+    debounceMs: GIT_SYNC_DEBOUNCE_MS,
+    pollIntervalMs: GIT_SYNC_POLL_INTERVAL_MS,
+    commitOnWrite: CONFIG.git.policy.commitOnWrite,
+    autoPush: GIT_AUTO_PUSH,
+    messageTemplate: CONFIG.git.policy.messageTemplate,
+    signoff: CONFIG.git.policy.signoff,
+    remote: CONFIG.git.remote,
+    branch: CONFIG.git.branch,
+    logger: console,
+  });
+  gitSyncWorker.start();
+  gitSyncWorker.forceSync('startup').catch((e: any) => {
+    const message = e instanceof Error ? e.message : String(e);
+    console.warn(`[git-sync] startup sync failed: ${message}`);
+  });
+} else {
+  console.log('[git-sync] disabled (GIT_SYNC_ENABLED=0)');
+}
 
 // Register TDD/Speckit handlers
 const additionalHandlers = new Map<string, (params: any, ctx?: any) => Promise<any>>();
@@ -88,18 +128,36 @@ function newSession(worker_id: string) {
 }
 
 // Safe export: write markdown to shadow file and timestamped snapshot; never overwrite TODO.md directly.
+// Lockless design: uses filesystem atomic operations (rename) for concurrent safety
 function performServerSyncExport(): { shadow: string, snapshot: string } {
-  const md = db.exportTodoMd();
-  const now = new Date();
-  const ts = now.toISOString().replace(/[:.]/g,'-');
-  const snapFile = path.join(EXPORT_DIR, `TODO.autosave-${ts}.md`);
-  // atomic-ish write: write temp then rename
-  const tempShadow = SHADOW_PATH + '.tmp';
-  fs.writeFileSync(tempShadow, md, 'utf-8');
-  fs.renameSync(tempShadow, SHADOW_PATH);
-  fs.writeFileSync(snapFile, md, 'utf-8');
-  console.log(`[autosync] exported to shadow=${SHADOW_PATH}, snapshot=${snapFile}`);
-  return { shadow: SHADOW_PATH, snapshot: snapFile };
+  try {
+    // Ensure directories exist (idempotent)
+    fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
+    fs.mkdirSync(EXPORT_DIR, { recursive: true });
+
+    // Get latest TODO.md from DB
+    const md = db.exportTodoMd();
+
+    // Generate snapshot filename with timestamp
+    const now = new Date();
+    const ts = now.toISOString().replace(/[:.]/g,'-');
+    const snapFile = path.join(EXPORT_DIR, `TODO.autosave-${ts}.md`);
+
+    // Atomic write: temp file → rename (last-write-wins, no locks needed)
+    const tempShadow = SHADOW_PATH + '.tmp';
+    fs.writeFileSync(tempShadow, md, 'utf-8');
+    fs.renameSync(tempShadow, SHADOW_PATH); // Atomic operation
+
+    // Snapshot write (historical record, no atomicity needed)
+    fs.writeFileSync(snapFile, md, 'utf-8');
+
+    console.log(`[autosync] exported to shadow=${SHADOW_PATH}, snapshot=${snapFile}`);
+    return { shadow: SHADOW_PATH, snapshot: snapFile };
+  } catch (e) {
+    // Log but don't fail (best-effort)
+    console.error('[autosync] error:', (e as Error).message);
+    throw e; // Re-throw for now, can be changed to return default values
+  }
 }
 
 const wss = new WebSocketServer({ host: '0.0.0.0', port: PORT });
@@ -144,6 +202,7 @@ wss.on('connection', (ws, req) => {
         const vclock = db.upsertTask(String(tid), String(title), String(text), metaArg, typeof if_vclock==='number' ? if_vclock : undefined);
         const task = db.getTask(String(tid));
         broadcastChange('task', String(tid), 'upsert', task);
+        try { performServerSyncExport(); } catch (e) { /* ignore */ }
         ws.send(stringify(ok({ vclock }, id)));
       } catch (e: any) {
         if (e.code === 409) ws.send(stringify(err(409, 'vclock_conflict', id)));
@@ -158,6 +217,7 @@ wss.on('connection', (ws, req) => {
         const vclock = db.markDone(String(tid), !!done, typeof if_vclock==='number'?if_vclock:undefined);
         const task = db.getTask(String(tid));
         broadcastChange('task', String(tid), 'mark_done', task);
+        try { performServerSyncExport(); } catch (e) { /* ignore */ }
         ws.send(stringify(ok({ vclock }, id)));
       } catch (e: any) {
         if (e.code === 404) ws.send(stringify(err(404,'not_found', id)));
@@ -186,6 +246,7 @@ wss.on('connection', (ws, req) => {
       if (!content) { ws.send(stringify(err(400,'missing_content', id))); return; }
       try {
         const result = db.importTodoMd(content);
+        try { performServerSyncExport(); } catch (e) { /* ignore */ }
         ws.send(stringify(ok(result, id)));
       } catch (e: any) {
         ws.send(stringify(err(500, e.message || 'error', id)));
@@ -196,6 +257,31 @@ wss.on('connection', (ws, req) => {
       try {
         const markdown = db.exportTodoMd();
         ws.send(stringify(ok({ content: markdown }, id)));
+      } catch (e: any) {
+        ws.send(stringify(err(500, e.message || 'error', id)));
+      }
+    }],
+    ['server_sync_export', async (params, id) => {
+      requireAuth(params);
+      if (!gitSyncWorker) {
+        const projection = db.projectAll(REPO_ROOT, SPECIFY_DIR);
+        if (!projection.ok) {
+          ws.send(stringify(err(500, projection.error ?? 'projection_failed', id)));
+          return;
+        }
+        ws.send(stringify(ok({
+          ok: true,
+          reason: 'git_sync_disabled',
+          projection,
+          committed: false,
+          pushed: false,
+          skippedReason: 'git_sync_disabled'
+        }, id)));
+        return;
+      }
+      try {
+        const outcome = await gitSyncWorker.forceSync('rpc');
+        ws.send(stringify(ok(outcome, id)));
       } catch (e: any) {
         ws.send(stringify(err(500, e.message || 'error', id)));
       }
@@ -476,6 +562,7 @@ wss.on('connection', (ws, req) => {
             const vclock = db.upsertTask(String(tid), String(title), String(text), metaArg, typeof if_vclock==='number' ? if_vclock : undefined);
             const task = db.getTask(String(tid));
             broadcastChange('task', String(tid), 'upsert', task);
+            try { performServerSyncExport(); } catch (e) { /* ignore */ }
             send(ok({ vclock }, id));
           } catch (e: any) {
             if (e.code === 409) send(err(409, 'vclock_conflict', id));
@@ -513,6 +600,7 @@ wss.on('connection', (ws, req) => {
             const vclock = db.markDone(String(tid), !!done, typeof if_vclock==='number'?if_vclock:undefined);
             const task = db.getTask(String(tid));
             broadcastChange('task', String(tid), 'mark_done', task);
+            try { performServerSyncExport(); } catch (e) { /* ignore */ }
             send(ok({ vclock }, id));
           } catch (e: any) {
             if (e.code === 404) send(err(404,'not_found', id));
@@ -561,6 +649,7 @@ case 'archive_task': {
   try {
     const result = db.archiveTask(String(tid), reason);
     broadcastChange('task', String(tid), 'archive', { archived: true, reason });
+    try { performServerSyncExport(); } catch (e) { /* ignore */ }
     send(ok(result, id));
   }
   catch (e: any) { send(err(e.code||500, e.message||'error', id)); }
@@ -574,6 +663,7 @@ case 'restore_task': {
     const result = db.restoreTask(String(tid));
     const task = db.getTask(String(tid));
     broadcastChange('task', String(tid), 'restore', task);
+    try { performServerSyncExport(); } catch (e) { /* ignore */ }
     send(ok(result, id));
   }
   catch (e: any) { send(err(e.code||500, e.message||'error', id)); }
@@ -691,6 +781,7 @@ case 'list_archived': {
           if (!content) { send(err(400,'missing_content', id)); break; }
           try {
             const result = db.importTodoMd(content);
+            try { performServerSyncExport(); } catch (e) { /* ignore */ }
             send(ok(result, id));
           } catch (e: any) { send(err(500, e.message || 'error', id)); }
           break;
@@ -851,12 +942,15 @@ console.log(`[mcp] listening on ws://0.0.0.0:${PORT}`);
 process.on('SIGINT', () => {
   console.log('[signal] SIGINT');
   try { if (AUTO_EXPORT_ON_EXIT) performServerSyncExport(); } catch(e) { console.warn('[autosync] failed:', (e as Error).message); }
+  gitSyncWorker?.stop();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
   console.log('[signal] SIGTERM');
   try { if (AUTO_EXPORT_ON_EXIT) performServerSyncExport(); } catch(e) { console.warn('[autosync] failed:', (e as Error).message); }
+  gitSyncWorker?.stop();
   process.exit(0);
 });
+
 
 

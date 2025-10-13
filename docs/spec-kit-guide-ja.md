@@ -129,6 +129,13 @@ specify init . --here --force --ai claude
 ```
 
 → `.specify/specs/<ID-user-auth>/spec.md` が生成。
+
+#### 機能名と <ID-...> の生成規則
+
+- 「機能名」とは、`/speckit.specify` 実行時に入力する機能のタイトル（例: "User Authentication", "Task Search"）。
+- ディレクトリ名 `<ID-user-auth>` は、機能名をスラッグ化（小文字・空白や記号の除去/置換）し、必要に応じて連番を付与したものが自動生成されます。
+- 例: `User Authentication` → `user-auth` → `.specify/specs/<ID-user-auth>/`。
+- 必要に応じて後からリネーム可能です（相対リンクで参照しているため、ドキュメント内リンクを合わせて変更すればOK）。
 **補強**：`/speckit.clarify` で不明点の質問リストを出させ、仕様に反映。
 
 **仕様テンプレ（見出しベース）**
@@ -270,7 +277,7 @@ MCP TODO Server 側の RPC は、メソッド名→ハンドラのマップで�
 
 #### ワークツリー（Git worktree）利用例
 
-`get_repo_binding` で `repoRoot` を取得し、`repo://path/to/file` の解決やコミット方針に従った反映を行います。`CONFIG.git.autoEnsureWorktree` が有効な場合は未作成でもサーバ側で安全に作成されます。明示的にワークツリーを確保したい場合は `ensure_worktree` を先に呼びます。
+`get_repo_binding` で `repoRoot` を取得し、ファイル参照は **worktreeルートからの相対パス**を第一推奨とします（`repo://path/to/file` は任意スキームとして許可、いずれも `repoRoot` 基準）。`CONFIG.git.autoEnsureWorktree` が有効な場合は未作成でもサーバ側で安全に作成されます。明示的にワークツリーを確保したい場合は `ensure_worktree` を先に呼びます。
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"ensure_worktree","params":{"authToken":"<MCP_TOKEN>","branch":"feat/awesome","dirName":"feat-awesome"}}

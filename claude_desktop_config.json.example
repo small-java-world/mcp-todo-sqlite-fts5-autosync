@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "unity-mcp": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\kawan\\Documents\\UnityMCP\\build\\index.js"
+      ]
+    },
+    "todo-sqlite-fts5": {
+      "command": "node",
+      "args": [
+        "D:\\mcp-todo-sqlite-fts5-autosync\\dist\\stdio-server.js"
+      ],
+      "env": {
+        "AUTO_EXPORT_ON_EXIT": "1"
+      }
+    }
+  }
+}

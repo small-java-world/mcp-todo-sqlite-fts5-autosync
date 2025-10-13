@@ -1,10 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { registerSpeckitBridge } from '../../src/mcp/speckit.js';
+import { DB } from '../../src/utils/db.js';
 import fs from 'fs';
 import path from 'path';
 
 describe('registerSpeckitBridge', () => {
   let handlers: Map<string, (params: any, ctx?: any) => Promise<any>>;
+  let db: DB;
   let testDir: string;
 
   beforeEach(() => {
@@ -12,7 +14,9 @@ describe('registerSpeckitBridge', () => {
     const register = (method: string, handler: (params: any, ctx?: any) => Promise<any>) => {
       handlers.set(method, handler);
     };
-    registerSpeckitBridge(register);
+    // minimal DB for speckit bridge (only used when todo_id is provided)
+    db = new DB('.tmp-test', 'speckit.db', '.tmp-test/cas');
+    registerSpeckitBridge(register, db);
 
     // Create temp directory for test output
     testDir = path.join(process.cwd(), '.test-output', `speckit-${Date.now()}`);
@@ -29,6 +33,10 @@ describe('registerSpeckitBridge', () => {
     const specifyDir = path.join(process.cwd(), '.specify');
     if (fs.existsSync(specifyDir)) {
       fs.rmSync(specifyDir, { recursive: true, force: true });
+    }
+    try { db.close(); } catch {}
+    if (fs.existsSync('.tmp-test')) {
+      fs.rmSync('.tmp-test', { recursive: true, force: true });
     }
   });
 
@@ -92,5 +100,18 @@ describe('registerSpeckitBridge', () => {
 
     expect(result.ok).toBe(true);
     expect(fs.existsSync(path.join(process.cwd(), '.specify', 'demo'))).toBe(true);
+  });
+
+  it('should index worktree-relative url when todo_id is provided', async () => {
+    const handler = handlers.get('speckit.run')!;
+    // ensure task exists so note.put can link to it
+    db.upsertTask('T-REL-1', 'Rel Test', 'body', undefined, undefined);
+    const result = await handler({ cmd: '/speckit.tasks', todo_id: 'T-REL-1', created_by: 'tester' });
+    expect(result.ok).toBe(true);
+    const notes = db.listNotes('T-REL-1', 'spec_tasks');
+    expect(notes.length).toBeGreaterThan(0);
+    const url = String(notes[0].url || '');
+    // should not include drive letter absolute prefix; expect relative path
+    expect(/^[A-Za-z]:[\/]/.test(url)).toBe(false);
   });
 });

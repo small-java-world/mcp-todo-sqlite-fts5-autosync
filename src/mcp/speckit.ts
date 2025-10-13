@@ -6,6 +6,7 @@
 import { promises as fs } from "fs";
 import * as path from "path";
 import { DB } from "../utils/db.js";
+import { CONFIG } from "../config.js";
 
 type JsonRpcCtx = { log?: (...a: any[]) => void };
 
@@ -35,12 +36,21 @@ export function registerSpeckitBridge(
       const createdBy = params?.created_by ? String(params.created_by) : undefined;
       if (todoId) {
         try {
+          // Normalize to worktree-root-relative URL if possible
+          const worktreeRoot = CONFIG.git.worktreeRoot || CONFIG.git.repoRoot;
+          let urlPath = fp;
+          if (worktreeRoot) {
+            const rel = path.relative(worktreeRoot, fp);
+            if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+              urlPath = rel.replace(/\\/g, '/');
+            }
+          }
           db.putNote({
             id: `NOTE-${Date.now()}`,
             todo_id: todoId,
             kind: "spec_tasks",
             text: undefined,
-            url: fp,
+            url: urlPath,
             created_by: createdBy,
             idempotency_key: `idemp-${Date.now()}-${Math.random().toString(16).slice(2)}`
           });

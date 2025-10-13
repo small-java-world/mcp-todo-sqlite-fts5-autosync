@@ -242,19 +242,70 @@ ws.on('message', (buf) => {
 環境変数: `MCP_URL` (既定 `ws://127.0.0.1:8765`), `MCP_TOKEN` (既定 `devtoken`)
 
 
-## 10) 安全な同期（サーバ停止時の自動エクスポート & 影コピー）
-- サーバは **停止時(SIGINT/SIGTERM)** に、DB内容の TODO を Markdown として**影コピー**へ書き出し、さらに **スナップショット**を `data/snapshots/` に保存します。
-- 既定の保存先：
-  - 影コピー: `data/shadow/TODO.shadow.md`（上書きだが**一時ファイル→rename**で安全）
-  - スナップショット: `data/snapshots/TODO.autosave-<ISO>.md`（追記形式）
-- 環境変数：
-  - `AUTO_EXPORT_ON_EXIT=1`（既定=1／0で無効化）
-  - `EXPORT_DIR=data/snapshots`
-  - `SHADOW_PATH=data/shadow/TODO.shadow.md`
+## 10) 安全な同期（自動エクスポート & Git同期）
 
-### 手動同期（RPC）
-- `server_sync_export` … サーバ側で上記と同じ処理を即時実行。
+### 10.1 二相コミット設計
+MCP Serverは **二相コミット** で TODO.md を安全に更新します。
 
+**Phase 1: DB → TODO.shadow.md（ロックレス、並行安全）**
+- 更新系 API（`upsert_task`, `mark_done`, `archive_task`, `restore_task`, `importTodoMd` など）が呼び出される度に `performServerSyncExport()` が TODO.shadow.md を原子的に更新する。
+- 書き込みは一時ファイル → `rename()` で行い、ロック無しで競合安全。
+- 常に最新スナップショットを `data/shadow/TODO.shadow.md` に保持し、履歴は `data/snapshots/TODO.autosave-<ISO>.md` に蓄積。
+
+**Phase 2: TODO.shadow.md → TODO.md + Git commit/push（GitSyncWorker）**
+- GitSyncWorker が TODO.shadow.md の更新時刻をポーリングし、変更検知後に Debounce（既定 5000ms）してから DB→ファイルの投影を実行。
+- `db.projectAll()` を呼び出し、`TODO.md` と `.specify/**` を再生成。
+- `GIT_COMMIT_ON_WRITE=true` の場合は自動的に `git add` → `git commit` を実行。
+- `GIT_AUTO_PUSH=true` の場合はさらに `git push <remote> <branch>` を行う。
+
+### 10.2 環境変数
+
+**自動エクスポート設定**
+- `AUTO_EXPORT_ON_EXIT=1`（既定 = 1 ／ 0 で無効化）… サーバ停止時(SIGINT/SIGTERM)のエクスポート。
+- `EXPORT_DIR=data/snapshots` … スナップショット保存先。
+- `SHADOW_PATH=data/shadow/TODO.shadow.md` … シャドウファイルパス。
+
+**Git同期設定**
+- `GIT_SYNC_ENABLED=1`（既定 = 0 ／ 1 で有効化）… GitSyncWorker を起動する。
+- `GIT_SYNC_DEBOUNCE_MS=5000`（既定 = 5000ms）… 変更検知後の待機時間。
+- `GIT_SYNC_POLL_INTERVAL_MS=2000`（既定 = 2000ms）… shadow ファイル監視間隔。
+- `GIT_COMMIT_ON_WRITE=true`（既定 = false）… ファイル更新後に自動 `git commit`。
+- `GIT_AUTO_PUSH=true`（既定 = false）… 追加で `git push` を実行。
+- `GIT_COMMIT_TEMPLATE` … コミットメッセージテンプレート（`{summary}`, `{taskIds}`, `{signoff}` を自動展開）。
+- `GIT_SIGNOFF=true` … `Signed-off-by:` を自動付与。
+
+**Git設定（詳細は `AGENT_BINDING.md` 参照）**
+- `GIT_REPO_ROOT` … プロジェクトルート（既定: `process.cwd()`）。
+- `GIT_WORKTREE_ROOT` … 既存 worktree がある場合に明示指定。
+- `GIT_BRANCH` … コミット対象のブランチ名（既定: `autosync/dummy`）。
+- `GIT_REMOTE=origin` … push 先リモート名。
+
+**ダミー構成（ローカル検証用）例**
+```bash
+export GIT_SYNC_ENABLED=0
+export GIT_BRANCH="autosync/dummy"
+export GIT_REMOTE="origin"
+export GIT_COMMIT_ON_WRITE=false
+export GIT_AUTO_PUSH=false
+export GIT_SYNC_DEBOUNCE_MS=5000
+export GIT_SYNC_POLL_INTERVAL_MS=2000
+```
+→ 本番で自動コミット/プッシュを有効にする際は `GIT_BRANCH`, `GIT_REMOTE` を正しい値に更新し、`GIT_SYNC_ENABLED=1` と `GIT_COMMIT_ON_WRITE=true`（必要なら `GIT_AUTO_PUSH=true`）を設定してください。
+
+### 10.3 ファイル配置
+```
+ data/
+   shadow/
+     TODO.shadow.md       # Phase 1: 原子的書き込み先（ロックレス）
+   snapshots/
+     TODO.autosave-*.md   # スナップショット履歴
+<repoRoot>/
+   TODO.md                # Phase 2: Git 管理下のファイル
+   .specify/**            # 要件・テストケース等
+```
+
+### 10.4 手動同期（RPC）
+- `server_sync_export` … 上記と同じ処理を即時実行（GitSyncWorker 無効時は DB→ファイル投影のみ）。
 
 ## 11) テスト
 
@@ -288,17 +339,18 @@ npm test test/integration/
 ### 環境変数（worktree）
 - `GIT_REPO_ROOT`（プロジェクトの .git 管理側のルート。未指定時は `process.cwd()`）
 - `GIT_WORKTREES_DIR`（既定: `worktrees`）
-- `GIT_WORKTREE_ROOT`（明示worktreeがある場合に直接指定；通常は `ensure_worktree` を使用）
-- `GIT_AUTO_ENSURE_WORKTREE=true`（`get_repo_binding`で自動worktree作成を有効化）
-- `GIT_WORKTREE_NAME`（自動作成時のworktree名。未指定時はブランチ名をサニタイズ）
-- `GIT_BRANCH`（必須推奨）
+- `GIT_WORKTREE_ROOT`（既存 worktree がある場合に明示指定。通常は `ensure_worktree` を使用）
+- `GIT_AUTO_ENSURE_WORKTREE=true`（`get_repo_binding` で自動 worktree 作成を有効化）
+- `GIT_WORKTREE_NAME`（自動作成時の worktree 名。未指定時はブランチ名をサニタイズ）
+- `GIT_BRANCH`（既定: `autosync/dummy`。本番では対象ブランチを必ず指定）
 - `GIT_REMOTE=origin`
-- `GIT_COMMIT_ON_WRITE=true`
+- `GIT_SYNC_ENABLED=1`（既定: 0 ／ 1 で GitSyncWorker を有効化）
+- `GIT_COMMIT_ON_WRITE=true`（既定: false）
+- `GIT_AUTO_PUSH=true`（既定: false）
 - `GIT_SAFE_GLOBS=docs/**,src/**,.github/**`
 - `GIT_COMMIT_TEMPLATE="chore(todos): {summary}\n\nRefs: {taskIds}\n\n{signoff}"`
 - `GIT_SIGNOFF=true`
-- `GIT_ALLOWED_BRANCH_PREFIXES="feat/,fix/,chore/,refactor/"`（worktree作成を許可するブランチ接頭辞）
-
+- `GIT_ALLOWED_BRANCH_PREFIXES="feat/,fix/,chore/,refactor/"`（worktree 作成を許可するブランチ接頭辞）
 ## 便利RPC
 - `ensure_worktree({ branch, dirName })` → `<repoRoot>/<worktreesDir>/<dirName>` に worktree を作成（既存なら再利用）し、その worktree を `repoRoot` とするバインディングを返す。
 - `get_repo_binding()` → 既存worktreeがあれば返す。なければ`GIT_AUTO_ENSURE_WORKTREE=true`の場合、自動でworktreeを作成して返す。

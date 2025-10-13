@@ -6,7 +6,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "start:stdio": "node dist/stdio-server.js",
     "dev": "ts-node --transpile-only src/server.ts",
+    "dev:stdio": "ts-node --transpile-only src/stdio-server.ts",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
     "test": "vitest run",
