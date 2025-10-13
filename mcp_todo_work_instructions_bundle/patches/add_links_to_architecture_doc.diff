@@ -1,0 +1,10 @@
+--- a/docs/docs_architecture_purpose_and_intent_ja.md
++++ b/docs/docs_architecture_purpose_and_intent_ja.md
+@@
+ ## （追記）関連詳細ドキュメント
++- [TDD 位相モデル（FSM）](./tdd_phase_model.md)
++- [FTS5 同期方式（autosync）](./fts5_sync.md)
++- [投影の二相コミット](./projection_twophase.md)
++- [Search の安全設計](./search_safety.md)
++- [更新系 API への vclock 強制ポリシー](./vclock_policy.md)
++- [Ingestion Worker の SLA](./ingestion_worker_sla.md)
