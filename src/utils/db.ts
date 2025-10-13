@@ -18,6 +18,7 @@ import {
   validatePositiveNumber 
 } from './db-validators.js';
 import { parseAttrs as mdParseAttrs, isoToEpoch as mdIsoToEpoch } from './markdown-importer.js';
+import { MetaStore } from './meta-store.js';
 
 export type TaskRow = {
   id: string;
@@ -740,29 +741,7 @@ listArchived(limit=20, offset=0) {
 
   // Save timeline events to task meta
   private saveTimelineEvents(taskId: string, timelineEvents: any[]) {
-    if (!taskId) return;
-
-    const task = this.getTask(taskId);
-    if (!task) return;
-
-    // Get existing meta or create new one
-    let meta = {};
-    if (task.meta) {
-      try {
-        meta = JSON.parse(task.meta);
-      } catch (e) {
-        meta = {};
-      }
-    }
-
-    // Add timeline to meta
-    (meta as any).timeline = timelineEvents;
-
-    // Update task with new meta
-    const stmt = this.db.prepare(`
-      UPDATE tasks SET meta = ? WHERE id = ?
-    `);
-    stmt.run(JSON.stringify(meta), taskId);
+    new MetaStore(this.db).saveTimeline(taskId, timelineEvents);
   }
 
   // Handle related parsing
@@ -830,29 +809,7 @@ listArchived(limit=20, offset=0) {
 
   // Save related links to task meta
   private saveRelatedLinks(taskId: string, relatedLinks: any[]) {
-    if (!taskId) return;
-
-    const task = this.getTask(taskId);
-    if (!task) return;
-
-    // Get existing meta or create new one
-    let meta = {};
-    if (task.meta) {
-      try {
-        meta = JSON.parse(task.meta);
-      } catch (e) {
-        meta = {};
-      }
-    }
-
-    // Add related to meta
-    (meta as any).related = relatedLinks;
-
-    // Update task with new meta
-    const stmt = this.db.prepare(`
-      UPDATE tasks SET meta = ? WHERE id = ?
-    `);
-    stmt.run(JSON.stringify(meta), taskId);
+    new MetaStore(this.db).saveRelated(taskId, relatedLinks);
   }
 
   // Handle notes parsing
@@ -878,30 +835,7 @@ listArchived(limit=20, offset=0) {
 
   // Save notes to task meta
   private saveNotes(taskId: string, notesContent: string[]) {
-    if (!taskId) return;
-
-    const task = this.getTask(taskId);
-    if (!task) return;
-
-    // Get existing meta or create new one
-    let meta = {};
-    if (task.meta) {
-      try {
-        meta = JSON.parse(task.meta);
-      } catch (e) {
-        meta = {};
-      }
-    }
-
-    // Add notes to meta (join lines with newlines, trim trailing newlines)
-    const notesText = notesContent.join('\n').replace(/\n+$/, '');
-    (meta as any).notes = notesText;
-
-    // Update task with new meta
-    const stmt = this.db.prepare(`
-      UPDATE tasks SET meta = ? WHERE id = ?
-    `);
-    stmt.run(JSON.stringify(meta), taskId);
+    new MetaStore(this.db).saveNotes(taskId, notesContent);
   }
 
   // Handle meta parsing
@@ -927,41 +861,7 @@ listArchived(limit=20, offset=0) {
 
   // Save meta to task meta
   private saveMeta(taskId: string, metaContent: string[]) {
-    if (!taskId) return;
-
-    const task = this.getTask(taskId);
-    if (!task) return;
-
-    // Get existing meta or create new one
-    let meta = {};
-    if (task.meta) {
-      try {
-        meta = JSON.parse(task.meta);
-      } catch (e) {
-        meta = {};
-      }
-    }
-
-    // Parse JSON from meta content
-    const metaText = metaContent.join('\n');
-    try {
-      // Extract JSON from code blocks
-      const jsonMatch = metaText.match(/```json\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        const jsonText = jsonMatch[1];
-        const parsedMeta = JSON.parse(jsonText);
-        // Merge parsed meta with existing meta
-        Object.assign(meta, parsedMeta);
-      }
-    } catch (e) {
-      // If JSON parsing fails, ignore
-    }
-
-    // Update task with new meta
-    const stmt = this.db.prepare(`
-      UPDATE tasks SET meta = ? WHERE id = ?
-    `);
-    stmt.run(JSON.stringify(meta), taskId);
+    new MetaStore(this.db).saveMeta(taskId, metaContent);
   }
 
   // Handle issues parsing
