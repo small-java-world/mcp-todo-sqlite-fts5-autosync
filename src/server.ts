@@ -9,6 +9,9 @@ import stringify from 'fast-json-stable-stringify';
 import { DB } from './utils/db.js';
 import { ReviewIssuesManager } from './utils/review-issues.js';
 import { CONFIG } from './config.js';
+import { registerSpeckitBridge } from './mcp/speckit.js';
+import { registerTddTools } from './mcp/tdd.js';
+import { registerTodoSplitter } from './mcp/todo_splitter.js';
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 const TOKEN = process.env.MCP_TOKEN || null; // optional shared token
@@ -58,6 +61,16 @@ function ensureWorktreeLocally(branch: string, dirName: string, remote: string) 
 }
 fs.mkdirSync(EXPORT_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(SHADOW_PATH), { recursive: true });
+
+// Register TDD/Speckit handlers
+const additionalHandlers = new Map<string, (params: any, ctx?: any) => Promise<any>>();
+const registerHandler = (method: string, handler: (params: any, ctx?: any) => Promise<any>) => {
+  additionalHandlers.set(method, handler);
+};
+
+registerSpeckitBridge(registerHandler);
+registerTddTools(registerHandler);
+registerTodoSplitter(registerHandler);
 
 // mDNS advertise (optional)
 try {
@@ -438,7 +451,15 @@ case 'list_archived': {
           return send(ok({ vclock: state.vclock, sha256: nextSha }, id));
         }
         default:
-          send(err(-32601,'method_not_found', id));
+          // Check for additional handlers registered by plugins
+          if (additionalHandlers.has(method)) {
+            const handler = additionalHandlers.get(method)!;
+            const ctx = { log: console.log };
+            handler(params, ctx).then(result => send(ok(result, id)))
+              .catch((e: any) => send(err(e.code || 500, e.message || 'error', id)));
+          } else {
+            send(err(-32601,'method_not_found', id));
+          }
       }
     } catch (e: any) {
       const code = e.code ?? 500;
