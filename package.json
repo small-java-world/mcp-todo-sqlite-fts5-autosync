@@ -9,7 +9,8 @@
     "dev": "ts-node --transpile-only src/server.ts",
     "test:unit": "vitest run test/unit",
     "test:integration": "vitest run test/integration",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "better-sqlite3": "^9.6.0",
