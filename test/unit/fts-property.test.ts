@@ -9,7 +9,7 @@ describe('FTS Property Tests', () => {
   let tempDir: string;
   let db: DB;
 
-  const vocab = ['Alpha','Beta','Gamma','Delta','Epsilon','Database','Search','Index','FTS','Performance'];
+  const vocab = ['Alpha','Beta','Gamma','Delta','Epsilon','Database','Search','Index','FTS','Performance','Scalability','Throughput','Latency','Availability','Consistency'];
 
   beforeEach(() => {
     tempDir = `temp_test_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
@@ -46,31 +46,34 @@ describe('FTS Property Tests', () => {
     expect(ids).toContain(id);
   });
 
-  it('Sequence: queries are invariant under FTS rebuild', () => {
+  it('Sequence: queries are invariant under FTS rebuild (with archive/restore and long texts, meta terms)', () => {
     // Deterministic RNG
     let seed = 123456789;
     const rng = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return ((seed>>>0) % 1_000_000) / 1_000_000; };
 
-    const N = 60;
+    const N = 80;
     const ids: string[] = [];
     for (let i=0; i<N; i++) {
       const id = `T-FTS-${i}`;
       const title = `${vocab[randInt(vocab.length, rng)]} ${vocab[randInt(vocab.length, rng)]}`;
-      const text = `${vocab[randInt(vocab.length, rng)]} ${vocab[randInt(vocab.length, rng)]} ${vocab[randInt(vocab.length, rng)]}`;
+      const text = new Array(6).fill(0).map(()=>vocab[randInt(vocab.length, rng)]).join(' ') + ' ' + 'X'.repeat(randInt(200, rng));
       db.upsertTask(id, title, text, undefined, undefined);
       ids.push(id);
       // Occasionally update or delete or archive/restore
-      const op = randInt(5, rng);
+      const op = randInt(6, rng);
       if (op === 0) {
         db.upsertTask(id, title + ' Updated', text, undefined, undefined);
-      } else if (op === 1 && i % 9 === 0) {
+      } else if (op === 1 && i % 7 === 0) {
         // simulate delete via archive to keep schema invariant
         try { db.archiveTask(id, 'cleanup'); } catch {}
-        if (randInt(3, rng) === 0) { try { db.restoreTask(id); } catch {} }
+        if (randInt(2, rng) === 0) { try { db.restoreTask(id); } catch {} }
+      } else if (op === 2 && i % 11 === 0) {
+        // meta update influences FTS if indexed (optional); keep for coverage
+        try { db.upsertTask(id, title, text, { tags: ['perf','fts','meta'] }, undefined); } catch {}
       }
     }
 
-    const queries = ['Database', 'Search', 'FTS', 'Performance', 'Alpha', 'Gamma'];
+    const queries = ['Database', 'Search', 'FTS', 'Performance', 'Alpha', 'Gamma', 'Latency', 'Scalability'];
     const queryResultsBefore = new Map<string, string[]>();
     for (const q of queries) {
       const rows = db.db.prepare(`

@@ -134,6 +134,50 @@ data/
 - 並び替え: `bm25(tasks_fts)`
 - スニペット: `snippet(...)` でハイライト断片
 
+### 運用Tips: FTSフル再構築
+
+- 大量の一括更新やFTS不整合が疑われる場合は、以下のスクリプトでフル再構築できます。
+
+```bash
+# SQLiteシェル等で実行
+.read scripts/reindex_fts.sql
+```
+
+- サーバを停止せずに行う場合は、短時間の検索不一致が発生しないよう、アプリ側で一時的にハイライト/重い検索を抑制する運用を推奨します。
+
+### 受信例: todo.watch（WebSocket）
+
+```js
+// 既存のWS接続 ws
+ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'todo.watch', params: { authToken: '<MCP_TOKEN>' } }));
+ws.on('message', (buf) => {
+  const msg = JSON.parse(buf.toString());
+  if (msg.method === 'change') {
+    // 例: { entity:'task', id:'T-2025-001', op:'upsert', payload:{...} }
+    console.log('[change]', msg.params);
+  }
+});
+```
+
+### 運用FAQ（抜粋）
+
+- Q: 変更イベントが多いときの負荷対策は？
+  - A: `todo.watch` のフィルタ（entity/id）を活用、必要ならクライアント側でサロゲートバッファし、UI反映を一定周期にバッチ化。
+- Q: DBロック/FTS不整合が疑われるときは？
+  - A: まず `scripts/reindex_fts.sql` で再構築。解消しない場合は `data/` のWAL残留確認、テストでは一時ディレクトリのクリーンアップリトライを実施。
+
+### 移行手順: FTS5 トリガ適用（必要時）
+
+既存DBへ FTS5 external content と同期トリガを導入したい場合:
+
+1. バックアップを取得（`data/todo.db`）
+2. サーバ停止（またはメンテナンスモード）
+3. `db/fts5_triggers.sql` を適用（SQLiteシェルで `.read db/fts5_triggers.sql`）
+4. 必要に応じて `scripts/reindex_fts.sql` を実行
+5. サーバ再開→ `search`/`bm25`/`snippet` の動作確認
+
+注意: 既に `src/utils/db.ts` 起動時にFTS/トリガは生成されます。上記は既存DBへ明示的に適用する（または再生成する）ための手順です。
+
 ## 6) 注意
 - FTS5 が有効な SQLite が必要（macOS/Linuxは標準でOK。Windowsは配布DLLに含まれることが多い）。
 
